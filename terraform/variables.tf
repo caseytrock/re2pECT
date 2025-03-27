@@ -1,5 +1,5 @@
 variable "aws_region" {
-  description = "The AWS region to deploy resources"
+  description = "AWS region"
   type        = string
   default     = "us-west-2"
 }
@@ -7,37 +7,23 @@ variable "aws_region" {
 variable "aws_access_key" {
   description = "AWS access key"
   type        = string
+  sensitive   = true
 }
 
 variable "aws_secret_key" {
   description = "AWS secret key"
   type        = string
+  sensitive   = true
 }
 
 variable "ami_id" {
-  description = "The AMI ID to use for the EC2 instance"
+  description = "AMI ID for EC2"
   type        = string
-  default     = "ami-0f9d441b5d66d5f31"
-}
-
-variable "docker_image" {
-  description = "The Docker image to deploy"
-  type        = string
-}
-
-variable "key_name" {
-  description = "The name of the EC2 key pair"
-  type        = string
+  default     = "ami-0f9d441b5d66d5f31"  # Amazon Linux 2023
 }
 
 variable "instance_type" {
-  description = "The instance type for the EC2 instance"
+  description = "EC2 instance type"
   type        = string
   default     = "t2.micro"
-}
-
-variable "app_repo_url" {
-  description = "Git repository URL for the Flask app"
-  type        = string
-  default     = "https://github.com/caseytrock/re2pECT.git"
 }
