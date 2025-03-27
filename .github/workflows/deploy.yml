@@ -26,26 +26,6 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY }}
 
-      - name: Wait for IP Assignment
-        id: wait_for_ip
-        run: |
-          # Retry for up to 5 minutes
-          for i in {1..30}; do
-            IP=$(terraform -chdir=./terraform output -raw public_ip 2>/dev/null || true)
-            if [ -n "$IP" ]; then
-              echo "EC2_IP=$IP" >> $GITHUB_ENV
-              echo "::set-output name=ec2_ip::$IP"
-              break
-            fi
-            echo "Waiting for EC2 IP assignment (attempt $i/30)..."
-            sleep 10
-          done
-          
-          if [ -z "$IP" ]; then
-            echo "::error::Failed to get EC2 IP after 5 minutes"
-            exit 1
-          fi
-
       - name: Extract Outputs
         id: extract-outputs
         run: |
@@ -63,6 +43,51 @@ jobs:
           echo "SSH_PRIVATE_KEY<<EOF" >> $GITHUB_ENV
           echo "$SSH_KEY" >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
+
+          - name: Terraform Apply
+          run: terraform apply -auto-approve
+          working-directory: ./terraform
+        
+      - name: Get Instance ID
+        id: get_id
+        run: |
+          echo "instance_id=$(terraform -chdir=./terraform output -raw instance_id)" >> $GITHUB_OUTPUT
+      
+      - name: Wait for Public IP (up to 3 minutes)
+        id: wait_for_ip
+        run: |
+          INSTANCE_ID=${{ steps.get_id.outputs.instance_id }}
+          TIMEOUT=$((SECONDS + 180))  # 3 minute timeout
+          
+          while [ $SECONDS -lt $TIMEOUT ]; do
+            IP=$(aws ec2 describe-instances \
+              --instance-ids $INSTANCE_ID \
+              --query 'Reservations[0].Instances[0].PublicIpAddress' \
+              --output text)
+            
+            if [ "$IP" != "None" ] && [ -n "$IP" ]; then
+              echo "EC2_IP=$IP" >> $GITHUB_ENV
+              echo "::set-output name=ec2_ip::$IP"
+              echo "IP found: $IP"
+              exit 0
+            fi
+            
+            echo "Waiting for public IP assignment..."
+            sleep 10
+          done
+          
+          echo "::error::Timeout waiting for public IP"
+          exit 1
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY }}
+          AWS_REGION: ${{ vars.AWS_REGION || 'us-west-2' }}
+      
+      - name: Verify Connectivity
+        run: |
+          echo "Testing connection to ${{ env.EC2_IP }}..."
+          ping -c 4 ${{ env.EC2_IP }} || echo "Ping test failed (may be normal)"
+          nc -zv -w 5 ${{ env.EC2_IP }} 22 || echo "Port 22 test failed"
 
   deploy-application:
     needs: provision-infrastructure

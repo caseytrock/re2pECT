@@ -1,8 +1,11 @@
-# Add explicit dependency on public IP
+# terraform/outputs.tf
+output "instance_id" {
+  value = aws_instance.flask_app.id
+}
+
 output "public_ip" {
-  value       = aws_instance.flask_app.public_ip
-  description = "Only available AFTER instance is fully running"
-  depends_on = [aws_instance.flask_app]
+  value = try(aws_instance.flask_app.public_ip, "NOT_ASSIGNED_YET")
+  description = "Will be 'NOT_ASSIGNED_YET' if IP isn't assigned"
 }
 
 output "private_key_path" {
