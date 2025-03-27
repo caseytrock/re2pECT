@@ -1,6 +1,8 @@
+# Add explicit dependency on public IP
 output "public_ip" {
-  description = "Public IP of the EC2 instance"
   value       = aws_instance.flask_app.public_ip
+  description = "Only available AFTER instance is fully running"
+  depends_on = [aws_instance.flask_app]
 }
 
 output "private_key_path" {

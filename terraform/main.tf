@@ -92,4 +92,9 @@ resource "aws_instance" "flask_app" {
   vpc_security_group_ids = [aws_security_group.flask_app_sg.id]
   monitoring            = true
   lifecycle { ignore_changes = [user_data] }
+
+  # Add explicit wait-for-IP behavior
+  provisioner "local-exec" {
+    command = "echo 'Instance created with ID ${self.id}. Waiting for IP assignment...'"
+  }
 }

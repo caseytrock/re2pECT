@@ -26,6 +26,26 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY }}
 
+      - name: Wait for IP Assignment
+        id: wait_for_ip
+        run: |
+          # Retry for up to 5 minutes
+          for i in {1..30}; do
+            IP=$(terraform -chdir=./terraform output -raw public_ip 2>/dev/null || true)
+            if [ -n "$IP" ]; then
+              echo "EC2_IP=$IP" >> $GITHUB_ENV
+              echo "::set-output name=ec2_ip::$IP"
+              break
+            fi
+            echo "Waiting for EC2 IP assignment (attempt $i/30)..."
+            sleep 10
+          done
+          
+          if [ -z "$IP" ]; then
+            echo "::error::Failed to get EC2 IP after 5 minutes"
+            exit 1
+          fi
+
       - name: Extract Outputs
         id: extract-outputs
         run: |
