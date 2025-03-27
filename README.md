@@ -83,3 +83,7 @@ Notes
     Clean Up:
 
         Destroy the resources when done.
+
+
+notes to add:
+- repo must be lowercase
