@@ -82,7 +82,7 @@ jobs:
     needs: provision-infrastructure
     runs-on: ubuntu-latest
     env:
-      EC2_IP: ${{ needs.provision-infrastructure.outputs.ec2_ip }}  # 👈 Get EC2 IP from previous job!!!
+      EC2_IP: ${{ needs.provision-infrastructure.outputs.ec2_ip }}  # 👈 Get EC2 IP from previous job!!! well, that didn't work. gonna try adding it manually lol
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -90,15 +90,15 @@ jobs:
       - name: Configure SSH
         uses: shimataro/ssh-key-action@v2
         with:
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          key: ${{ needs.provision-infrastructure.outputs.ssh_key }} #adding this directly too, like the ec2 ip
           known_hosts: ${{ secrets.KNOWN_HOSTS }}
 
       - name: Verify EC2 Access
         run: |
-          echo "Testing SSH connection to ${{ env.EC2_IP }}..."
+          echo "Testing SSH connection to ${{ needs.provision-infrastructure.outputs.ec2_ip }}..."
           ssh -o StrictHostKeyChecking=no \
               -o ConnectTimeout=30 \
-              ec2-user@${{ env.EC2_IP }} \
+              ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} \
               "echo 'SSH connection successful! $(hostname)'"
 
       - name: Set up Docker Buildx
@@ -126,7 +126,7 @@ jobs:
         run: |
           ssh -o StrictHostKeyChecking=no \
               -o ConnectTimeout=30 \
-              ec2-user@${{ env.EC2_IP }} "
+              ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} "
             kubectl apply -f - <<EOF
             apiVersion: apps/v1
             kind: Deployment
