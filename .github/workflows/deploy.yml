@@ -62,12 +62,6 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           known_hosts: ${{ secrets.KNOWN_HOSTS }}
 
-      - name: Test SSH Connection
-        run: |
-          echo "Testing SSH connection..."
-          timeout 60 bash -c "until nc -zv ${{ secrets.EC2_IP }} 22; do sleep 2; done"
-          echo "SSH port responding!"
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -88,6 +82,12 @@ jobs:
             ghcr.io/${{ github.repository_owner }}/re2pect-app:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Test SSH Connection
+        run: |
+          echo "Testing SSH connection on ${{ secrets.EC2_IP }}..."
+          timeout 60 bash -c "until nc -zv ${{ secrets.EC2_IP }} 22; do sleep 2; done"
+          echo "SSH port responding!"
 
       - name: Deploy to k3s
         run: |
