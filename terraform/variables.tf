@@ -33,3 +33,9 @@ variable "instance_type" {
   type        = string
   default     = "t2.micro"
 }
+
+variable "app_repo_url" {
+  description = "Git repository URL for the Flask app"
+  type        = string
+  default     = "https://github.com/caseytrock/re2pECT.git"
+}

@@ -6,30 +6,36 @@ provider "aws" {
 
 provider "tls" {}
 
-# Generate an SSH key pair
+# Generate an SSH key pair with timestamp for rotation
 resource "tls_private_key" "flask_app_key" {
   algorithm = "RSA"
   rsa_bits  = 4096
 }
 
-# Create an AWS key pair using the generated public key
+# Create an AWS key pair with rotation support
 resource "aws_key_pair" "flask_app_key_pair" {
-  key_name   = "flask-app-key-pair"
+  key_name   = "flask-app-key-${sha256(timestamp())}"
   public_key = tls_private_key.flask_app_key.public_key_openssh
+
+  lifecycle {
+    ignore_changes = [key_name]  # Allow manual override of key name
+  }
 }
 
-# Save the private key to a file
+# Save the private key with strict permissions
 resource "local_file" "private_key" {
-  content  = tls_private_key.flask_app_key.private_key_pem
-  filename = "${path.module}/terraform-generated-key.pem"
-  file_permission = "0400" # Restrict permissions to the owner
+  content         = tls_private_key.flask_app_key.private_key_pem
+  filename        = "${path.module}/terraform-generated-key.pem"
+  file_permission = "0400"
 }
 
-# Define the security group for the Flask app
+# Security group with minimum necessary ports
 resource "aws_security_group" "flask_app_sg" {
-  name_prefix = "flask-app-sg"
+  name_prefix = "flask-app-sg-"
+  description = "Security group for Flask app on k3s"
 
   ingress {
+    description = "SSH access"
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
@@ -37,6 +43,7 @@ resource "aws_security_group" "flask_app_sg" {
   }
 
   ingress {
+    description = "HTTP traffic"
     from_port   = 80
     to_port     = 80
     protocol    = "tcp"
@@ -44,8 +51,9 @@ resource "aws_security_group" "flask_app_sg" {
   }
 
   ingress {
-    from_port   = 5000
-    to_port     = 5000
+    description = "k3s API"
+    from_port   = 6443
+    to_port     = 6443
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
@@ -57,58 +65,55 @@ resource "aws_security_group" "flask_app_sg" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  #k3s/traefik ports
-  ingress {
-    from_port   = 6443
-    to_port     = 6443
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+  lifecycle {
+    create_before_destroy = true
   }
 }
 
-# Define the EC2 instance
+# EC2 instance with improved user_data
 resource "aws_instance" "flask_app" {
   ami           = var.ami_id
   instance_type = var.instance_type
   key_name      = aws_key_pair.flask_app_key_pair.key_name
 
-user_data = <<-EOF
-#!/bin/bash
-set -e
-exec > >(tee /var/log/user-data.log) 2>&1
+  user_data = <<-EOF
+  #!/bin/bash
+  set -euo pipefail
+  exec > >(tee /var/log/user-data.log) 2>&1
 
-echo "=== Starting User Data ==="
+  echo "=== Starting User Data $(date) ==="
 
-# 1. Install Docker
-echo "[1/4] Installing Docker..."
-sudo yum update -y
-sudo yum install -y docker
-sudo systemctl start docker
-sudo systemctl enable docker
-echo "Docker installed."
+  # 1. Install dependencies
+  echo "[1/4] Installing packages..."
+  sudo yum update -y
+  sudo yum install -y git
 
-# 2. Install k3s
-echo "[2/4] Installing k3s..."
-curl -sfL https://get.k3s.io | K3S_KUBECONFIG_MODE="644" sh -
-echo "Waiting for k3s to initialize..."
+  # 3. Install k3s with Traefik
+  echo "[3/4] Installing k3s..."
+  curl -sfL https://get.k3s.io | \
+    INSTALL_K3S_VERSION="v1.27.6+k3s1" \
+    K3S_KUBECONFIG_MODE="644" \
+    sh -
 
-# Wait for k3s to be ready
-until sudo kubectl get nodes >/dev/null 2>&1; do
-  echo "Waiting for k3s API..."
-  sleep 10
-done
+  # Wait for cluster
+  echo -n "Waiting for k3s API..."
+  until kubectl get nodes >/dev/null 2>&1; do
+    echo -n "."
+    sleep 5
+  done
+  echo "Ready!"
 
-# 3. Configure kubectl access
-echo "[3/4] Configuring kubectl..."
-KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-sudo chmod 644 $KUBECONFIG
-mkdir -p /home/ec2-user/.kube
-sudo cp $KUBECONFIG /home/ec2-user/.kube/config
-sudo chown ec2-user:ec2-user /home/ec2-user/.kube/config
+  # 4. Set up persistent storage
+  echo "[4/4] Configuring storage..."
+  sudo mkdir -p /mnt/app-data
+  sudo chown -R ec2-user:ec2-user /mnt/app-data
 
-# 4. Deploy Flask app
-echo "[4/4] Deploying Flask app..."
-cat <<'EOL' > /tmp/flask-app.yaml
+  # Clone initial app code
+  git clone ${var.app_repo_url} /mnt/app-data || \
+    { echo "Failed to clone repo"; exit 1; }
+
+  # Apply Kubernetes manifest
+  cat <<EOL > /tmp/flask-app.yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -123,34 +128,42 @@ spec:
       labels:
         app: flask-app
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
       containers:
-        - name: flask-app
-          image: ${var.docker_image}
-          ports:
-            - containerPort: 5000
-          env:
-            - name: FLASK_APP
-              value: "app.py"
-            - name: FLASK_ENV
-              value: "development"
-          command: ["flask", "run", "--host=0.0.0.0"]
+      - name: flask
+        image: ${var.docker_image}
+        workingDir: /app
+        command: ["flask", "run", "--host=0.0.0.0"]
+        volumeMounts:
+          - name: app-code
+            mountPath: /app
+        env:
+          - name: FLASK_APP
+            value: "app.py"
+          - name: FLASK_ENV
+            value: "production"
+      volumes:
+        - name: app-code
+          hostPath:
+            path: /mnt/app-data
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: flask-app-service
+  name: flask-service
 spec:
   ports:
     - port: 80
       targetPort: 5000
   selector:
     app: flask-app
-  type: ClusterIP
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: flask-app-ingress
+  name: flask-ingress
   annotations:
     traefik.ingress.kubernetes.io/router.entrypoints: web
 spec:
@@ -161,18 +174,35 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: flask-app-service
+                name: flask-service
                 port:
                   number: 80
 EOL
 
-kubectl apply -f /tmp/flask-app.yaml --validate=false
-echo "=== Deployment Complete ==="
-EOF
+  kubectl apply -f /tmp/flask-app.yaml
+  echo "=== Deployment Complete ==="
+  EOF
 
   tags = {
-    Name = "flask-app-instance"
+    Name        = "flask-app-instance"
+    Environment = "production"
   }
 
-  security_groups = [aws_security_group.flask_app_sg.name]
+  vpc_security_group_ids = [aws_security_group.flask_app_sg.id]
+  monitoring            = true
+
+  lifecycle {
+    ignore_changes = [user_data]  # Allow CI/CD to manage updates
+  }
+}
+
+# Output the connection information
+output "instance_public_ip" {
+  description = "Public IP address of the EC2 instance"
+  value       = aws_instance.flask_app.public_ip
+}
+
+output "ssh_command" {
+  description = "Command to SSH into the instance"
+  value       = "ssh -i ${local_file.private_key.filename} ec2-user@${aws_instance.flask_app.public_ip}"
 }

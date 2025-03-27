@@ -1,0 +1,63 @@
+name: Deploy to k3s
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  EC2_IP: ${{ secrets.EC2_IP }}
+  SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure SSH
+        uses: shimataro/ssh-key-action@v2
+        with:
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          known_hosts: ${{ secrets.KNOWN_HOSTS }}
+
+      - name: Deploy to EC2
+        run: |
+          ssh -o StrictHostKeyChecking=no ec2-user@$EC2_IP "
+            # Sync latest code
+            CODE_DIR='/mnt/app-data/repo'
+            git -C \$CODE_DIR pull || git clone https://github.com/$GITHUB_REPOSITORY.git \$CODE_DIR
+
+            # Apply Kubernetes manifest
+            cat <<EOL | kubectl apply -f -
+            apiVersion: apps/v1
+            kind: Deployment
+            metadata:
+              name: flask-app
+            spec:
+              replicas: 1
+              template:
+                spec:
+                  containers:
+                  - name: flask
+                    image: python:3.9-slim
+                    workingDir: /app
+                    command: ['flask', 'run', '--host=0.0.0.0']
+                    volumeMounts:
+                      - name: app-code
+                        mountPath: /app
+                  volumes:
+                    - name: app-code
+                      hostPath:
+                        path: \$CODE_DIR
+            EOL
+          "
+
+      - name: Verify deployment
+        run: |
+          ssh ec2-user@$EC2_IP "
+            kubectl get pods
+            kubectl get ingress
+            curl -I http://localhost
+          "
