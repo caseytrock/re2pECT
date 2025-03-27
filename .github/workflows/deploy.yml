@@ -1,73 +1,39 @@
 name: Infrastructure and Deployment Pipeline
+
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
-
-env:
-  AWS_REGION: "us-west-2"
-  TF_VERSION: "1.7.2"
 
 jobs:
   provision-infrastructure:
-    name: Provision Infrastructure
     runs-on: ubuntu-latest
-    outputs:
-      ec2_ip: ${{ steps.terraform.outputs.public_ip }}
-      ssh_key: ${{ steps.extract-secrets.outputs.ssh_private_key }}
-    
     steps:
-      - name: Checkout repository
+      - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ env.TF_VERSION }}
 
       - name: Terraform Init
         run: terraform init
+        working-directory: ./terraform
 
       - name: Terraform Apply
         id: terraform
         run: terraform apply -auto-approve
+        working-directory: ./terraform
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY }}
 
       - name: Extract Outputs
-        id: extract-secrets
         run: |
-          echo "ssh_private_key=$(terraform output -raw ssh_private_key)" >> $GITHUB_OUTPUT
-          echo "public_ip=$(terraform output -raw public_ip)" >> $GITHUB_OUTPUT
-
-      - name: Update GitHub Secrets
-        uses: actions/github-script@v7
-        if: github.ref == 'refs/heads/main'  # Only update secrets on main branch
-        with:
-          script: |
-            await github.rest.actions.createOrUpdateRepoSecret({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              secret_name: 'SSH_PRIVATE_KEY',
-              encrypted_value: '${{ steps.extract-secrets.outputs.ssh_private_key }}'
-            })
-            await github.rest.actions.createOrUpdateRepoSecret({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              secret_name: 'EC2_IP',
-              encrypted_value: '${{ steps.extract-secrets.outputs.public_ip }}'
-            })
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          echo "EC2_IP=$(terraform -chdir=./terraform output -raw public_ip)" >> $GITHUB_ENV
+          echo "SSH_PRIVATE_KEY=$(terraform -chdir=./terraform output -raw ssh_private_key)" >> $GITHUB_ENV
 
   deploy-application:
-    name: Deploy Application
     needs: provision-infrastructure
     runs-on: ubuntu-latest
-    environment: production
-    
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -75,25 +41,22 @@ jobs:
       - name: Configure SSH
         uses: shimataro/ssh-key-action@v2
         with:
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          key: ${{ env.SSH_PRIVATE_KEY }}
           known_hosts: ${{ secrets.KNOWN_HOSTS }}
 
-      - name: Build and Push Docker Image
+      - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
-          context: .
+          context: ./app  # Point to app directory
           push: true
-          tags: |
-            ghcr.io/${{ github.repository }}/flask-app:latest
-            ghcr.io/${{ github.repository }}/flask-app:${{ github.sha }}
+          tags: ghcr.io/${{ github.repository }}:latest
           secrets: |
-            "GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }}"
+            GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }}
 
-      - name: Deploy to k3s Cluster
+      - name: Deploy to k3s
         run: |
-          ssh -o StrictHostKeyChecking=no ec2-user@${{ secrets.EC2_IP }} "
-            # Apply Kubernetes manifest
-            cat <<EOL | kubectl apply -f -
+          ssh -o StrictHostKeyChecking=no ec2-user@${{ env.EC2_IP }} "
+            kubectl apply -f - <<EOF
             apiVersion: apps/v1
             kind: Deployment
             metadata:
@@ -110,31 +73,11 @@ jobs:
                 spec:
                   containers:
                   - name: flask
-                    image: ghcr.io/${{ github.repository }}/flask-app:${{ github.sha }}
+                    image: ghcr.io/${{ github.repository }}:latest
                     ports:
                     - containerPort: 5000
                     env:
                     - name: FLASK_ENV
                       value: production
-            ---
-            apiVersion: v1
-            kind: Service
-            metadata:
-              name: flask-service
-            spec:
-              selector:
-                app: flask
-              ports:
-                - protocol: TCP
-                  port: 80
-                  targetPort: 5000
-            EOL
-          "
-
-      - name: Verify Deployment
-        run: |
-          ssh ec2-user@${{ secrets.EC2_IP }} "
-            kubectl get pods -w
-            kubectl get svc
-            curl -I http://localhost
+            EOF
           "
