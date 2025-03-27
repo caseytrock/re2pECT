@@ -81,6 +81,8 @@ jobs:
   deploy-application:
     needs: provision-infrastructure
     runs-on: ubuntu-latest
+    env:
+      EC2_IP: ${{ needs.provision-infrastructure.outputs.ec2_ip }}  # 👈 Get EC2 IP from previous job!!!
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
