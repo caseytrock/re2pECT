@@ -27,9 +27,22 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY }}
 
       - name: Extract Outputs
+        id: extract-outputs
         run: |
-          echo "EC2_IP=$(terraform -chdir=./terraform output -raw public_ip)" >> $GITHUB_ENV
-          echo "SSH_PRIVATE_KEY=$(terraform -chdir=./terraform output -raw ssh_private_key)" >> $GITHUB_ENV
+          EC2_IP=$(terraform -chdir=./terraform output -raw public_ip)
+          SSH_KEY=$(terraform -chdir=./terraform output -raw ssh_private_key)
+          
+          # Verify outputs exist
+          if [ -z "$EC2_IP" ] || [ -z "$SSH_KEY" ]; then
+            echo "::error::Failed to extract Terraform outputs"
+            exit 1
+          fi
+          
+          # Multi-line safe output handling
+          echo "EC2_IP=$EC2_IP" >> $GITHUB_ENV
+          echo "SSH_PRIVATE_KEY<<EOF" >> $GITHUB_ENV
+          echo "$SSH_KEY" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
 
   deploy-application:
     needs: provision-infrastructure
@@ -41,7 +54,7 @@ jobs:
       - name: Configure SSH
         uses: shimataro/ssh-key-action@v2
         with:
-          key: ${{ env.SSH_PRIVATE_KEY }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
           known_hosts: ${{ secrets.KNOWN_HOSTS }}
 
       - name: Build and push Docker image
@@ -55,7 +68,7 @@ jobs:
 
       - name: Deploy to k3s
         run: |
-          ssh -o StrictHostKeyChecking=no ec2-user@${{ env.EC2_IP }} "
+          ssh -o StrictHostKeyChecking=no ec2-user@${{ secrets.EC2_IP }} "
             kubectl apply -f - <<EOF
             apiVersion: apps/v1
             kind: Deployment
