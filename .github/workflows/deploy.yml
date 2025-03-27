@@ -53,8 +53,8 @@ jobs:
 
       - name: Verify EC2 IP
         run: |
-          echo "Trying to connect to EC2 at: ${{ secrets.EC2_IP }}"
-          ping -c 4 ${{ secrets.EC2_IP }} || echo "Ping failed"
+          echo "Trying to connect to EC2 at: ${{ env.EC2_IP }}"
+          ping -c 4 ${{ env.EC2_IP }} || echo "Ping failed"
 
       - name: Configure SSH
         uses: shimataro/ssh-key-action@v2
@@ -85,13 +85,13 @@ jobs:
 
       - name: Test SSH Connection
         run: |
-          echo "Testing SSH connection on ${{ secrets.EC2_IP }}..."
-          timeout 60 bash -c "until nc -zv ${{ secrets.EC2_IP }} 22; do sleep 2; done"
+          echo "Testing SSH connection on ${{ env.EC2_IP }}..."
+          timeout 60 bash -c "until nc -zv ${{ env.EC2_IP }} 22; do sleep 2; done"
           echo "SSH port responding!"
 
       - name: Deploy to k3s
         run: |
-          ssh -o StrictHostKeyChecking=no ec2-user@${{ secrets.EC2_IP }} "
+          ssh -o StrictHostKeyChecking=no ec2-user@${{ env.EC2_IP }} "
             kubectl apply -f - <<EOF
             apiVersion: apps/v1
             kind: Deployment
