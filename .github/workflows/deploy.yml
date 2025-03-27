@@ -83,12 +83,6 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Test SSH Connection
-        run: |
-          echo "Testing SSH connection on ${{ env.EC2_IP }}..."
-          timeout 60 bash -c "until nc -zv ${{ env.EC2_IP }}:22; do sleep 2; done"
-          echo "SSH port responding!"
-
       - name: Deploy to k3s
         run: |
           ssh -o StrictHostKeyChecking=no ec2-user@${{ env.EC2_IP }} "
