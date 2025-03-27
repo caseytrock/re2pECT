@@ -25,33 +25,39 @@ jobs:
       - name: Deploy to EC2
         run: |
           ssh -o StrictHostKeyChecking=no ec2-user@$EC2_IP "
-            # Sync latest code
-            CODE_DIR='/mnt/app-data/repo'
-            git -C \$CODE_DIR pull || git clone https://github.com/$GITHUB_REPOSITORY.git \$CODE_DIR
+          # Ensure directory exists
+          sudo mkdir -p /mnt/app-data/repo
+          sudo chown -R ec2-user:ec2-user /mnt/app-data
+          
+          # Sync code
+          if [ -d '/mnt/app-data/repo/.git' ]; then
+            cd /mnt/app-data/repo && git pull
+          else
+            git clone https://github.com/$GITHUB_REPOSITORY.git /mnt/app-data/repo
 
-            # Apply Kubernetes manifest
-            cat <<EOL | kubectl apply -f -
-            apiVersion: apps/v1
-            kind: Deployment
-            metadata:
-              name: flask-app
-            spec:
-              replicas: 1
-              template:
-                spec:
-                  containers:
-                  - name: flask
-                    image: python:3.9-slim
-                    workingDir: /app
-                    command: ['flask', 'run', '--host=0.0.0.0']
-                    volumeMounts:
-                      - name: app-code
-                        mountPath: /app
-                  volumes:
+          # Apply Kubernetes manifest
+          cat <<EOL | kubectl apply -f -
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: flask-app
+          spec:
+            replicas: 1
+            template:
+              spec:
+                containers:
+                - name: flask
+                  image: python:3.9-slim
+                  workingDir: /app
+                  command: ['flask', 'run', '--host=0.0.0.0']
+                  volumeMounts:
                     - name: app-code
-                      hostPath:
-                        path: \$CODE_DIR
-            EOL
+                      mountPath: /app
+                volumes:
+                  - name: app-code
+                    hostPath:
+                      path: \$CODE_DIR
+          EOL
           "
 
       - name: Verify deployment

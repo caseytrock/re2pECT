@@ -103,14 +103,18 @@ resource "aws_instance" "flask_app" {
   done
   echo "Ready!"
 
-  # 4. Set up persistent storage
-  echo "[4/4] Configuring storage..."
-  sudo mkdir -p /mnt/app-data
+  # 4. Create persistent storage directory
+  echo "[4/4] Setting up app directory..."
+  sudo mkdir -p /mnt/app-data/repo
   sudo chown -R ec2-user:ec2-user /mnt/app-data
+  ls -la /mnt/app-data  # Verify creation
 
-  # Clone initial app code
-  git clone ${var.app_repo_url} /mnt/app-data || \
-    { echo "Failed to clone repo"; exit 1; }
+  # 5. Deploy Flask app
+  echo "[5/5] Deploying Flask app..."
+  git clone ${var.app_repo_url} /mnt/app-data/repo || {
+    echo "Git clone failed, using existing repo"
+    cd /mnt/app-data/repo && git pull
+  }
 
   # Apply Kubernetes manifest
   cat <<EOL > /tmp/flask-app.yaml
