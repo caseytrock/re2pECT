@@ -53,6 +53,11 @@ jobs:
           path: ./ssh_artifacts/deploy_key
           retention-days: 1
 
+      - name: Verify Instance Readiness
+        run: |
+          IP=${{ steps.get-outputs.outputs.public_ip }}
+          until nc -z -w5 $IP 22; do sleep 10; echo "Waiting for SSH..."; done
+
   deploy-application:
     needs: provision-infrastructure
     runs-on: ubuntu-latest
@@ -69,16 +74,16 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           echo "StrictHostKeyChecking no" >> ~/.ssh/config
 
-      - name: Verify SSH Access
+      - name: Verify k3s Readiness
         run: |
           ssh -i ~/.ssh/deploy_key \
               ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} \
-              "echo 'SSH connection successful!'"
+              "until [ -f /home/ec2-user/.kube/config ]; do sleep 5; echo 'Waiting for k3s...'; done"
 
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Deploy with Traefik
+      - name: Deploy with Traefik Ingress
         run: |
           cat <<EOF > deploy.yaml
           apiVersion: apps/v1
@@ -135,3 +140,7 @@ jobs:
           ssh -i ~/.ssh/deploy_key \
               ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} \
               "kubectl apply -f deploy.yaml && kubectl get pods,svc,ingress"
+
+      - name: Verify Application
+        run: |
+          curl -v http://${{ needs.provision-infrastructure.outputs.ec2_ip }}/
