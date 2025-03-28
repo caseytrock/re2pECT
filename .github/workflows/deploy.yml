@@ -49,6 +49,7 @@ jobs:
 
       - name: Upload SSH Key
         uses: actions/upload-artifact@v4
+        if: always()  # always upload artifact so we can have the SSH key even on failed runs
         with:
           name: ssh-key
           path: ./ssh_artifacts/deploy_key
