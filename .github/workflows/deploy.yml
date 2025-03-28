@@ -49,7 +49,6 @@ jobs:
 
       - name: Upload SSH Key
         uses: actions/upload-artifact@v4
-        if: always()  # always upload artifact so we can have the SSH key even on failed runs
         with:
           name: ssh-key
           path: ./ssh_artifacts/deploy_key
@@ -96,6 +95,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and Push Docker Image
+        id: build-push
         uses: docker/build-push-action@v5
         with:
           context: ./app
@@ -105,6 +105,24 @@ jobs:
             ghcr.io/${{ github.repository_owner }}/re2pect-app:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Wait for Image Availability
+        run: |
+          # Wait for image to be available in GHCR
+          until docker pull ${{ env.DOCKER_IMAGE }} >/dev/null 2>&1; do
+            sleep 10
+            echo "Waiting for image to be available in registry..."
+          done
+          echo "Image successfully pulled from registry"
+
+      - name: Verify Image Integrity
+        run: |
+          docker pull ${{ env.DOCKER_IMAGE }}
+          if ! docker inspect ${{ env.DOCKER_IMAGE }} >/dev/null 2>&1; then
+            echo "ERROR: Image inspection failed - likely corrupted"
+            exit 1
+          fi
+          echo "Image integrity verified"
 
       - name: Deploy with Traefik Ingress
         run: |
@@ -126,8 +144,21 @@ jobs:
                 containers:
                 - name: app
                   image: ${{ env.DOCKER_IMAGE }}
+                  imagePullPolicy: Always
                   ports:
                   - containerPort: ${{ env.FLASK_PORT }}
+                  readinessProbe:
+                    httpGet:
+                      path: /
+                      port: ${{ env.FLASK_PORT }}
+                    initialDelaySeconds: 10
+                    periodSeconds: 5
+                  livenessProbe:
+                    httpGet:
+                      path: /
+                      port: ${{ env.FLASK_PORT }}
+                    initialDelaySeconds: 30
+                    periodSeconds: 10
           ---
           apiVersion: v1
           kind: Service
@@ -165,6 +196,21 @@ jobs:
               ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} \
               "kubectl apply -f deploy.yaml && kubectl get pods,svc,ingress"
 
+      - name: Wait for Application Readiness
+        run: |
+          IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
+          # Wait for pods to be running
+          ssh -i ~/.ssh/deploy_key ec2-user@$IP \
+            "until kubectl get pods -o jsonpath='{.items[*].status.phase}' | grep -q Running; do sleep 5; echo 'Waiting for pods to be ready...'; done"
+          
+          # Wait for ingress to be available
+          ssh -i ~/.ssh/deploy_key ec2-user@$IP \
+            "until kubectl get ingress re2pect-app-ingress -o jsonpath='{.status.loadBalancer.ingress[0].ip}' &>/dev/null; do sleep 5; echo 'Waiting for ingress...'; done"
+
       - name: Verify Application
         run: |
-          curl -v http://${{ needs.provision-infrastructure.outputs.ec2_ip }}/
+          IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
+          # Try both direct IP and nip.io host
+          curl -v --retry 5 --retry-delay 10 \
+            http://$IP/ \
+            http://$IP.nip.io/

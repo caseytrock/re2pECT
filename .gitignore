@@ -8,3 +8,4 @@ terraform/.terraform.lock.hcl
 .git
 __pycache__
 *.pyc
+terraform/deploy_key
