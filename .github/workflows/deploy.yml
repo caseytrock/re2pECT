@@ -147,7 +147,8 @@ jobs:
               traefik.ingress.kubernetes.io/router.entrypoints: web
           spec:
             rules:
-            - http:
+            - host: "${{ needs.provision-infrastructure.outputs.ec2_ip }}.nip.io"
+              http:
                 paths:
                 - path: /
                   pathType: Prefix
