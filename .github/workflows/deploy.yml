@@ -107,11 +107,30 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Verify Image in Containerd
+      - name: Configure GHCR Auth for Containerd
         run: |
-          ssh -i ~/.ssh/deploy_key \
-              ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} \
-              "sudo crictl pull ${{ env.DOCKER_IMAGE }}"
+          IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
+          ssh -i ~/.ssh/deploy_key ec2-user@$IP << 'EOF'
+          # Create containerd registry config
+          sudo mkdir -p /etc/rancher/k3s/
+          cat << 'EOL' | sudo tee /etc/rancher/k3s/registries.yaml
+          mirrors:
+            ghcr.io:
+              endpoint:
+                - "https://ghcr.io"
+          configs:
+            "ghcr.io":
+              auth:
+                username: "${{ github.repository_owner }}"
+                password: "${{ secrets.GITHUB_TOKEN }}"
+          EOL
+          
+          # Restart k3s to apply changes
+          sudo systemctl restart k3s
+          
+          # Verify pull with credentials
+          sudo crictl pull --creds "${{ github.repository_owner }}:${{ secrets.GITHUB_TOKEN }}" ${{ env.DOCKER_IMAGE }}
+          EOF
 
       - name: Deploy with Traefik Ingress
         run: |
