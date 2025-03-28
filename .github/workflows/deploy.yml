@@ -182,9 +182,10 @@ jobs:
             name: re2pect-app-ingress
             annotations:
               traefik.ingress.kubernetes.io/router.entrypoints: web
+              traefik.ingress.kubernetes.io/router.rule: Host(`{{EC2_IP}}.nip.io`) && PathPrefix(`/`)  # Explicit rule
           spec:
             rules:
-            - host: "${{ needs.provision-infrastructure.outputs.ec2_ip }}.nip.io"
+            - host: "{{EC2_IP}}.nip.io"
               http:
                 paths:
                 - path: /
@@ -193,7 +194,7 @@ jobs:
                     service:
                       name: re2pect-app-service
                       port:
-                        number: ${{ env.FLASK_PORT }}
+                        number: 5000
           EOF
 
           scp -i ~/.ssh/deploy_key deploy.yaml ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }}:~/deploy.yaml
