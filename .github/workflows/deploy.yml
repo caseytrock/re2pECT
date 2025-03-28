@@ -144,7 +144,16 @@ jobs:
                 dnsPolicy: ClusterFirstWithHostNet
           EOL
           sudo systemctl restart k3s
-          sleep 20  # Wait for changes to apply
+          sleep 60
+          EOF
+
+      - name: Verify Traefik
+        run: |
+          ssh -i ~/.ssh/deploy_key ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} << 'EOF'
+          # Check Traefik pod status
+          kubectl get pods -n kube-system -l app.kubernetes.io/name=traefik
+          # Verify port binding
+          sudo netstat -tulnp | grep -E ':80\s'
           EOF
 
       - name: Verify Traefik Port Binding
