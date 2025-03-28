@@ -125,27 +125,27 @@ jobs:
           sudo systemctl restart k3s
           EOF
 
-          - name: Configure Traefik for Port 80
-          run: |
-            ssh -i ~/.ssh/deploy_key ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} << 'EOF'
-            sudo cat << 'EOL' | sudo tee /var/lib/rancher/k3s/server/manifests/traefik-config.yaml
-            apiVersion: helm.cattle.io/v1
-            kind: HelmChartConfig
-            metadata:
-              name: traefik
-              namespace: kube-system
-            spec:
-              valuesContent: |-
-                ports:
-                  web:
-                    hostPort: 80
-                deployment:
-                  hostNetwork: true
-                  dnsPolicy: ClusterFirstWithHostNet
-            EOL
-            sudo systemctl restart k3s
-            sleep 20  # Wait for changes to apply
-            EOF
+      - name: Configure Traefik for Port 80
+        run: |
+          ssh -i ~/.ssh/deploy_key ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} << 'EOF'
+          sudo cat << 'EOL' | sudo tee /var/lib/rancher/k3s/server/manifests/traefik-config.yaml
+          apiVersion: helm.cattle.io/v1
+          kind: HelmChartConfig
+          metadata:
+            name: traefik
+            namespace: kube-system
+          spec:
+            valuesContent: |-
+              ports:
+                web:
+                  hostPort: 80
+              deployment:
+                hostNetwork: true
+                dnsPolicy: ClusterFirstWithHostNet
+          EOL
+          sudo systemctl restart k3s
+          sleep 20  # Wait for changes to apply
+          EOF
 
       - name: Verify Traefik Port Binding
         run: |
@@ -209,10 +209,10 @@ jobs:
             name: re2pect-app-ingress
             annotations:
               traefik.ingress.kubernetes.io/router.entrypoints: web
-              traefik.ingress.kubernetes.io/router.rule: Host(`${{needs.provision-infrastructure.outputs.ec2_ip}}.nip.io`) && PathPrefix(`/`)  # Explicit rule
+              traefik.ingress.kubernetes.io/router.rule: Host(\`${{ needs.provision-infrastructure.outputs.ec2_ip }}.nip.io\`) && PathPrefix(\`/\`)
           spec:
             rules:
-            - host: "${{needs.provision-infrastructure.outputs.ec2_ip}}.nip.io"
+            - host: "${{ needs.provision-infrastructure.outputs.ec2_ip }}.nip.io"
               http:
                 paths:
                 - path: /
@@ -221,7 +221,7 @@ jobs:
                     service:
                       name: re2pect-app-service
                       port:
-                        number: 5000
+                        number: ${{ env.FLASK_PORT }}
           EOF
 
           scp -i ~/.ssh/deploy_key deploy.yaml ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }}:~/deploy.yaml
@@ -255,4 +255,5 @@ jobs:
         run: |
           IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
           curl -v --retry 5 --retry-delay 10 \
-            http://$IP.nip.io/
+            -H "Host: $IP.nip.io" \
+            http://$IP/
