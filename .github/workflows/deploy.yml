@@ -7,7 +7,7 @@ on:
 env:
   AWS_REGION: 'us-west-2'
   FLASK_PORT: '5000'
-  DOCKER_IMAGE: ghcr.io/${{ github.repository_owner }}/re2pect-app:${{ github.sha }}
+  DOCKER_IMAGE: ghcr.io/${{ github.repository_owner }}/re2pect-app:latest
 
 jobs:
   provision-infrastructure:
@@ -33,7 +33,7 @@ jobs:
         working-directory: ./terraform
 
       - name: Terraform Apply
-        run: terraform apply -auto-approve
+        run: terraform apply -auto-approve -var="ghcr_username=${{ github.repository_owner }}" -var="ghcr_token=${{ secrets.GITHUB_TOKEN }}"
         working-directory: ./terraform
 
       - name: Get Public IP
@@ -49,6 +49,7 @@ jobs:
 
       - name: Upload SSH Key
         uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: ssh-key
           path: ./ssh_artifacts/deploy_key
@@ -75,11 +76,11 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           echo "StrictHostKeyChecking no" >> ~/.ssh/config
 
-      - name: Verify Docker and k3s Readiness
+      - name: Verify k3s Readiness (Containerd)
         run: |
           ssh -i ~/.ssh/deploy_key \
               ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} \
-              "until sudo docker ps &>/dev/null && kubectl get nodes &>/dev/null; do sleep 5; echo 'Waiting for Docker/k3s...'; done"
+              "until sudo crictl ps &>/dev/null && kubectl get nodes &>/dev/null; do sleep 5; echo 'Waiting for containerd/k3s...'; done"
 
       - name: Checkout code
         uses: actions/checkout@v4
@@ -106,23 +107,11 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Wait for Image Availability
+      - name: Verify Image in Containerd
         run: |
-          # Wait for image to be available in GHCR
-          until docker pull ${{ env.DOCKER_IMAGE }} --no-cache >/dev/null 2>&1; do
-            sleep 10
-            echo "Waiting for image to be available in registry..."
-          done
-          echo "Image successfully pulled from registry"
-
-      - name: Verify Image Integrity
-        run: |
-          docker pull ${{ env.DOCKER_IMAGE }} --no-cache
-          if ! docker inspect ${{ env.DOCKER_IMAGE }} >/dev/null 2>&1; then
-            echo "ERROR: Image inspection failed - likely corrupted"
-            exit 1
-          fi
-          echo "Image integrity verified"
+          ssh -i ~/.ssh/deploy_key \
+              ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} \
+              "sudo crictl pull ${{ env.DOCKER_IMAGE }}"
 
       - name: Deploy with Traefik Ingress
         run: |
@@ -208,10 +197,22 @@ jobs:
           ssh -i ~/.ssh/deploy_key ec2-user@$IP \
             "until kubectl get ingress re2pect-app-ingress -o jsonpath='{.status.loadBalancer.ingress[0].ip}' &>/dev/null; do sleep 5; echo 'Waiting for ingress...'; done"
 
+      - name: Debug Pod Issues (On Failure)
+        if: failure()
+        run: |
+          IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
+          ssh -i ~/.ssh/deploy_key ec2-user@$IP << 'EOF'
+          echo "=== Pod Status ==="
+          kubectl get pods -o wide
+          echo "=== Pod Details ==="
+          kubectl describe pods -l app=re2pect-app
+          echo "=== Containerd Pull Logs ==="
+          sudo crictl inspecti ${{ env.DOCKER_IMAGE }}
+          EOF
+
       - name: Verify Application
         run: |
           IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
-          # Try both direct IP and nip.io host
           curl -v --retry 5 --retry-delay 10 \
             http://$IP/ \
             http://$IP.nip.io/

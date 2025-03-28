@@ -72,18 +72,33 @@ resource "aws_instance" "flask_app" {
     set -euo pipefail
     exec > >(tee /var/log/user-data.log) 2>&1
 
-    # Install Docker
-    sudo yum install -y docker
-    sudo systemctl enable docker
-    sudo systemctl start docker
-    sudo usermod -aG docker ec2-user
+    # Install prerequisites
+    sudo yum install -y containerd
 
-    # Install k3s with Docker as the container runtime
-    echo "=== Installing k3s with Docker ==="
+    # Install k3s (defaults to containerd)
+    echo "=== Installing k3s with containerd ==="
     curl -sfL https://get.k3s.io | \
       INSTALL_K3S_VERSION="v1.27.6+k3s1" \
       K3S_KUBECONFIG_MODE="644" \
-      sh -s - --docker
+      sh -s -
+
+    # Configure GHCR authentication for containerd
+    echo "=== Configuring containerd for GHCR ==="
+    sudo mkdir -p /etc/rancher/k3s/
+    cat << 'EOL' | sudo tee /etc/rancher/k3s/registries.yaml
+    mirrors:
+      ghcr.io:
+        endpoint:
+          - "https://ghcr.io"
+    configs:
+      "ghcr.io":
+        auth:
+          username: "${var.ghcr_username}"
+          password: "${var.ghcr_token}"
+    EOL
+
+    # Restart k3s to apply registry config
+    sudo systemctl restart k3s
 
     # Install kubectl
     echo "=== Installing kubectl ==="
@@ -97,13 +112,9 @@ resource "aws_instance" "flask_app" {
     sudo cp /etc/rancher/k3s/k3s.yaml /home/ec2-user/.kube/config
     sudo chown ec2-user:ec2-user /home/ec2-user/.kube/config
 
-    # Wait for cluster to be ready
+    # Verify cluster
     echo "=== Waiting for cluster ==="
     until kubectl get nodes >/dev/null 2>&1; do sleep 5; done
-
-    # Verify Docker is working with k3s
-    echo "=== Verifying Docker containers ==="
-    sudo docker ps | grep k3s
   EOF
 
   vpc_security_group_ids = [aws_security_group.flask_app_sg.id]

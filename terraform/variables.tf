@@ -15,3 +15,14 @@ variable "instance_type" {
   type        = string
   default     = "t2.micro"
 }
+
+variable "ghcr_username" {
+  description = "GitHub username for GHCR"
+  type        = string
+}
+
+variable "ghcr_token" {
+  description = "GitHub token with packages:read"
+  type        = string
+  sensitive   = true
+}
