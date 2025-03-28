@@ -54,10 +54,11 @@ jobs:
           echo "Private key stored as artifact"
 
       - name: Upload SSH Key Artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: ssh-key
           path: ./ssh_artifacts/deploy_key
+          retention-days: 1  # Automatically clean up after 1 day
 
       - name: Wait for Instance Readiness
         run: |
@@ -91,7 +92,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download SSH Key Artifact
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: ssh-key
           path: ~/.ssh/
