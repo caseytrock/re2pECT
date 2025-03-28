@@ -6,10 +6,15 @@ on:
 
 env:
   AWS_REGION: 'us-west-2'
+  FLASK_PORT: '5000'  # Matching your Dockerfile
 
 jobs:
   provision-infrastructure:
     runs-on: ubuntu-latest
+    outputs:
+      ec2_ip: ${{ steps.get-outputs.outputs.public_ip }}
+      ssh_key: ${{ steps.get-outputs.outputs.ssh_private_key }}
+      kubeconfig_cmd: ${{ steps.get-outputs.outputs.kubeconfig }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -29,60 +34,26 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY }}
 
-      - name: Get Instance ID
-        id: get-instance-id
+      - name: Get Terraform Outputs
+        id: get-outputs
         run: |
-          echo "instance_id=$(terraform -chdir=./terraform output -raw instance_id)" >> $GITHUB_OUTPUT
+          echo "public_ip=$(terraform -chdir=./terraform output -raw public_ip)" >> $GITHUB_OUTPUT
+          echo "ssh_private_key=$(terraform -chdir=./terraform output -raw ssh_private_key)" >> $GITHUB_OUTPUT
+          echo "kubeconfig=$(terraform -chdir=./terraform output -raw kubeconfig)" >> $GITHUB_OUTPUT
+          echo "EC2_IP=$(terraform -chdir=./terraform output -raw public_ip)" >> $GITHUB_ENV
 
-      - name: Wait for Public IP
-        id: wait-for-ip
+      - name: Verify k3s Installation
         run: |
-          INSTANCE_ID=${{ steps.get-instance-id.outputs.instance_id }}
-          TIMEOUT=$((SECONDS + 180))  # 3 minute timeout
-          
-          while [ $SECONDS -lt $TIMEOUT ]; do
-            IP=$(aws ec2 describe-instances \
-              --instance-ids $INSTANCE_ID \
-              --query 'Reservations[0].Instances[0].PublicIpAddress' \
-              --output text \
-              --region ${{ env.AWS_REGION }})
-            
-            if [ "$IP" != "None" ] && [ -n "$IP" ]; then
-              echo "EC2_IP=$IP" >> $GITHUB_ENV
-              echo "::set-output name=ec2_ip::$IP"
-              echo "IP found: $IP"
-              exit 0
-            fi
-            
-            echo "Waiting for public IP assignment..."
-            sleep 10
-          done
-          
-          echo "::error::Timeout waiting for public IP"
-          exit 1
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY }}
-
-      - name: Verify Connectivity
-        run: |
-          echo "Testing connection to ${{ env.EC2_IP }}..."
-          ping -c 4 ${{ env.EC2_IP }} || echo "Ping test failed (may be normal)"
-          nc -zv -w 5 ${{ env.EC2_IP }} 22 || echo "Port 22 test failed"
-
-      - name: Extract SSH Key
-        id: extract-ssh-key
-        run: |
-          SSH_KEY=$(terraform -chdir=./terraform output -raw ssh_private_key)
-          echo "SSH_PRIVATE_KEY<<EOF" >> $GITHUB_ENV
-          echo "$SSH_KEY" >> $GITHUB_ENV
-          echo "EOF" >> $GITHUB_ENV
+          echo "Waiting for k3s to become ready..."
+          ssh -o StrictHostKeyChecking=no \
+              -i ./terraform/terraform-generated-key.pem \
+              ec2-user@${{ env.EC2_IP }} \
+              "until kubectl get nodes >/dev/null 2>&1; do sleep 5; done"
+          echo "k3s is ready!"
 
   deploy-application:
     needs: provision-infrastructure
     runs-on: ubuntu-latest
-    env:
-      EC2_IP: ${{ needs.provision-infrastructure.outputs.ec2_ip }}  # 👈 Get EC2 IP from previous job!!! well, that didn't work. gonna try adding it manually lol
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -90,7 +61,7 @@ jobs:
       - name: Configure SSH
         uses: shimataro/ssh-key-action@v2
         with:
-          key: ${{ needs.provision-infrastructure.outputs.ssh_key }} #adding this directly too, like the ec2 ip
+          key: ${{ needs.provision-infrastructure.outputs.ssh_key }}
           known_hosts: ${{ secrets.KNOWN_HOSTS }}
 
       - name: Verify EC2 Access
@@ -127,6 +98,7 @@ jobs:
           ssh -o StrictHostKeyChecking=no \
               -o ConnectTimeout=30 \
               ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} "
+            # Create deployment
             kubectl apply -f - <<EOF
             apiVersion: apps/v1
             kind: Deployment
@@ -146,6 +118,43 @@ jobs:
                   - name: app
                     image: ghcr.io/${{ github.repository_owner }}/re2pect-app:${{ github.sha }}
                     ports:
-                    - containerPort: 5000
+                    - containerPort: ${{ env.FLASK_PORT }}
+                    resources:
+                      requests:
+                        cpu: "100m"
+                        memory: "128Mi"
+            EOF
+
+            # Create service
+            kubectl apply -f - <<EOF
+            apiVersion: v1
+            kind: Service
+            metadata:
+              name: re2pect-app-service
+            spec:
+              selector:
+                app: re2pect-app
+              ports:
+                - protocol: TCP
+                  port: 80
+                  targetPort: ${{ env.FLASK_PORT }}
+              type: LoadBalancer
             EOF
           "
+
+      - name: Verify Deployment
+        run: |
+          ssh -o StrictHostKeyChecking=no \
+              -o ConnectTimeout=30 \
+              ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} "
+            kubectl wait --for=condition=available \
+                        --timeout=300s \
+                        deployment/re2pect-app
+            kubectl get pods,svc
+          "
+
+      - name: Store kubeconfig command
+        run: |
+          echo "KUBECONFIG_CMD='${{ needs.provision-infrastructure.outputs.kubeconfig_cmd }}'" >> $GITHUB_ENV
+          echo "Use this command to access your cluster:"
+          echo "${{ needs.provision-infrastructure.outputs.kubeconfig_cmd }}"
