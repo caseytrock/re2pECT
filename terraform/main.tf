@@ -2,34 +2,6 @@ provider "aws" {
   region = var.aws_region
 }
 
-variable "aws_region" {
-  description = "AWS region"
-  type        = string
-  default     = "us-west-2"
-}
-
-variable "ami_id" {
-  description = "AMI ID for the EC2 instance"
-  type        = string
-}
-
-variable "instance_type" {
-  description = "EC2 instance type"
-  type        = string
-  default     = "t2.micro"
-}
-
-variable "ghcr_username" {
-  description = "GitHub username for GHCR"
-  type        = string
-}
-
-variable "ghcr_token" {
-  description = "GitHub token with packages:read"
-  type        = string
-  sensitive   = true
-}
-
 resource "tls_private_key" "flask_app_key" {
   algorithm = "RSA"
   rsa_bits  = 4096
