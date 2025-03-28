@@ -149,11 +149,24 @@ jobs:
 
       - name: Verify Traefik
         run: |
-          ssh -i ~/.ssh/deploy_key ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} << 'EOF'
+          ssh -T -i ~/.ssh/deploy_key ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} << 'EOF'
+          # Disable motd and verify Traefik
+          export DEBIAN_FRONTEND=noninteractive
+          touch ~/.hushlogin
+          
           # Check Traefik pod status
-          kubectl get pods -n kube-system -l app.kubernetes.io/name=traefik
-          # Verify port binding
-          sudo netstat -tulnp | grep -E ':80\s'
+          kubectl get pods -n kube-system -l app.kubernetes.io/name=traefik -o wide
+          
+          # Verify port 80 binding
+          if sudo netstat -tulnp | grep -q ':80\s'; then
+            echo "✅ Traefik is bound to port 80"
+          else
+            echo "❌ Traefik is NOT bound to port 80"
+            exit 1
+          fi
+          
+          # Verify Traefik config
+          sudo cat /var/lib/rancher/k3s/server/manifests/traefik-config.yaml | grep -A 5 'hostPort: 80'
           EOF
 
       - name: Verify Traefik Port Binding
