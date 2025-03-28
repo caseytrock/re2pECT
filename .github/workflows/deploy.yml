@@ -109,7 +109,7 @@ jobs:
       - name: Wait for Image Availability
         run: |
           # Wait for image to be available in GHCR
-          until docker pull ${{ env.DOCKER_IMAGE }} >/dev/null 2>&1; do
+          until docker pull ${{ env.DOCKER_IMAGE }} --no-cache >/dev/null 2>&1; do
             sleep 10
             echo "Waiting for image to be available in registry..."
           done
@@ -117,7 +117,7 @@ jobs:
 
       - name: Verify Image Integrity
         run: |
-          docker pull ${{ env.DOCKER_IMAGE }}
+          docker pull ${{ env.DOCKER_IMAGE }} --no-cache
           if ! docker inspect ${{ env.DOCKER_IMAGE }} >/dev/null 2>&1; then
             echo "ERROR: Image inspection failed - likely corrupted"
             exit 1
@@ -197,6 +197,7 @@ jobs:
               "kubectl apply -f deploy.yaml && kubectl get pods,svc,ingress"
 
       - name: Wait for Application Readiness
+        timeout-minutes: 10
         run: |
           IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
           # Wait for pods to be running
