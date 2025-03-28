@@ -39,23 +39,15 @@ jobs:
       - name: Get Terraform Outputs and Setup SSH
         id: get-outputs
         run: |
-          # Create SSH directory and set permissions
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
-          
-          # Get public IP
           PUBLIC_IP=$(terraform -chdir=./terraform output -raw public_ip)
           echo "public_ip=${PUBLIC_IP}" >> $GITHUB_OUTPUT
           echo "EC2_IP=${PUBLIC_IP}" >> $GITHUB_ENV
-          
-          # Write key directly to file
           terraform -chdir=./terraform output -raw ssh_private_key > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          
-          # Upload key as artifact for next job
           mkdir -p ./ssh_artifacts
           cp ~/.ssh/deploy_key ./ssh_artifacts/
-          echo "Private key stored as artifact"
 
       - name: Upload SSH Key Artifact
         uses: actions/upload-artifact@v4
@@ -69,30 +61,19 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY }}
         run: |
-          # Wait for EC2 status checks
           INSTANCE_ID=$(terraform -chdir=./terraform output -raw instance_id)
           aws ec2 wait instance-status-ok \
             --instance-ids $INSTANCE_ID \
             --region ${{ env.AWS_REGION }}
-          
-          # Wait for SSH
           IP=${{ env.EC2_IP }}
-          echo "Waiting for SSH on ${IP}..."
-          until nc -z -w5 $IP 22; do
-            sleep 10
-            echo "Still waiting for SSH..."
-          done
-          echo "SSH is now available!"
+          until nc -z -w5 $IP 22; do sleep 10; done
 
       - name: Verify k3s Installation
         run: |
-          echo "Waiting for k3s to become ready..."
           ssh -o StrictHostKeyChecking=no \
-              -o ConnectTimeout=30 \
               -i ~/.ssh/deploy_key \
               ec2-user@${{ env.EC2_IP }} \
-              "until kubectl get nodes >/dev/null 2>&1; do sleep 10; echo 'Waiting for k3s...'; done"
-          echo "k3s is ready!"
+              "until kubectl get nodes >/dev/null 2>&1; do sleep 10; done"
 
   deploy-application:
     needs: provision-infrastructure
@@ -112,10 +93,9 @@ jobs:
 
       - name: Verify EC2 Access
         run: |
-          echo "Testing SSH connection to ${{ needs.provision-infrastructure.outputs.ec2_ip }}..."
           ssh -i ~/.ssh/deploy_key \
               ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} \
-              "echo 'SSH connection successful! Hostname: $(hostname)'"
+              "echo 'SSH connection successful!'"
 
       - name: Checkout code
         uses: actions/checkout@v4
@@ -143,27 +123,30 @@ jobs:
 
       - name: Deploy to k3s
         run: |
-          ssh -i ~/.ssh/deploy_key \
-              ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} "
-            kubectl apply -f - <<EOF
-            apiVersion: apps/v1
-            kind: Deployment
-            metadata:
-              name: re2pect-app
-            spec:
-              replicas: 2
-              selector:
-                matchLabels:
+          DEPLOYMENT_YAML=$(cat <<-EOF
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: re2pect-app
+          spec:
+            replicas: 2
+            selector:
+              matchLabels:
+                app: re2pect-app
+            template:
+              metadata:
+                labels:
                   app: re2pect-app
-              template:
-                metadata:
-                  labels:
-                    app: re2pect-app
-                spec:
-                  containers:
-                  - name: app
-                    image: ghcr.io/${{ github.repository_owner }}/re2pect-app:${{ github.sha }}
-                    ports:
-                    - containerPort: ${{ env.FLASK_PORT }}
-            EOF
-          "
+              spec:
+                containers:
+                - name: app
+                  image: ghcr.io/${{ github.repository_owner }}/re2pect-app:${{ github.sha }}
+                  ports:
+                  - containerPort: ${{ env.FLASK_PORT }}
+          EOF
+          )
+          
+          echo "Applying deployment..."
+          ssh -i ~/.ssh/deploy_key \
+              ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} \
+              "kubectl apply -f -" <<< "$DEPLOYMENT_YAML"
