@@ -37,7 +37,7 @@ jobs:
       - name: Get Terraform Outputs
         id: get-outputs
         run: |
-          # Get and encode outputs to handle special characters
+          # Get and encode outputs
           PUBLIC_IP=$(terraform -chdir=./terraform output -raw public_ip)
           SSH_KEY=$(terraform -chdir=./terraform output -raw ssh_private_key | base64 -w0)
           KUBECONFIG_CMD=$(terraform -chdir=./terraform output -raw kubeconfig | base64 -w0)
@@ -47,15 +47,33 @@ jobs:
           echo "kubeconfig=${KUBECONFIG_CMD}" >> $GITHUB_OUTPUT
           echo "EC2_IP=${PUBLIC_IP}" >> $GITHUB_ENV
 
-          # Write key to file for immediate use
+          # Write key to file
           mkdir -p ~/.ssh
           terraform -chdir=./terraform output -raw ssh_private_key > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
+
+      - name: Wait for SSH Access
+        run: |
+          IP=${{ env.EC2_IP }}
+          echo "Waiting for SSH access to ${IP}..."
+          
+          # Wait up to 5 minutes for SSH to become available
+          for i in {1..30}; do
+            if nc -z -w5 ${IP} 22; then
+              echo "SSH port is open!"
+              exit 0
+            fi
+            echo "Attempt ${i}: SSH not ready yet..."
+            sleep 10
+          done
+          echo "Timed out waiting for SSH access"
+          exit 1
 
       - name: Verify k3s Installation
         run: |
           echo "Waiting for k3s to become ready..."
           ssh -o StrictHostKeyChecking=no \
+              -o ConnectTimeout=30 \
               -i ~/.ssh/deploy_key \
               ec2-user@${{ env.EC2_IP }} \
               "until kubectl get nodes >/dev/null 2>&1; do sleep 5; done"
