@@ -182,10 +182,10 @@ jobs:
             name: re2pect-app-ingress
             annotations:
               traefik.ingress.kubernetes.io/router.entrypoints: web
-              traefik.ingress.kubernetes.io/router.rule: Host(`${{EC2_IP}}.nip.io`) && PathPrefix(`/`)  # Explicit rule
+              traefik.ingress.kubernetes.io/router.rule: Host(`${{needs.provision-infrastructure.outputs.ec2_ip}}.nip.io`) && PathPrefix(`/`)  # Explicit rule
           spec:
             rules:
-            - host: "${{EC2_IP}}.nip.io"
+            - host: "${{needs.provision-infrastructure.outputs.ec2_ip}}.nip.io"
               http:
                 paths:
                 - path: /
