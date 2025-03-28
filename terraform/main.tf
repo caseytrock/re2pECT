@@ -47,11 +47,11 @@ resource "aws_security_group" "flask_app_sg" {
   }
 
   ingress {
-    description = "Internal App Communication"
+    description = "Internal Docker Communication"
     from_port   = 5000
     to_port     = 5000
     protocol    = "tcp"
-    self        = true
+    self        = true  # Only allow within the security group
   }
 
   egress {
@@ -70,21 +70,40 @@ resource "aws_instance" "flask_app" {
   user_data = <<-EOF
     #!/bin/bash
     set -euo pipefail
-    # Install k3s
+    exec > >(tee /var/log/user-data.log) 2>&1
+
+    # Install Docker
+    sudo yum install -y docker
+    sudo systemctl enable docker
+    sudo systemctl start docker
+    sudo usermod -aG docker ec2-user
+
+    # Install k3s with Docker as the container runtime
+    echo "=== Installing k3s with Docker ==="
     curl -sfL https://get.k3s.io | \
       INSTALL_K3S_VERSION="v1.27.6+k3s1" \
       K3S_KUBECONFIG_MODE="644" \
-      sh -
+      sh -s - --docker
+
     # Install kubectl
+    echo "=== Installing kubectl ==="
     curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
     chmod +x kubectl
     sudo mv kubectl /usr/local/bin/
+
     # Configure kubeconfig
+    echo "=== Configuring kubeconfig ==="
     mkdir -p /home/ec2-user/.kube
     sudo cp /etc/rancher/k3s/k3s.yaml /home/ec2-user/.kube/config
     sudo chown ec2-user:ec2-user /home/ec2-user/.kube/config
-    # Wait for cluster
+
+    # Wait for cluster to be ready
+    echo "=== Waiting for cluster ==="
     until kubectl get nodes >/dev/null 2>&1; do sleep 5; done
+
+    # Verify Docker is working with k3s
+    echo "=== Verifying Docker containers ==="
+    sudo docker ps | grep k3s
   EOF
 
   vpc_security_group_ids = [aws_security_group.flask_app_sg.id]
