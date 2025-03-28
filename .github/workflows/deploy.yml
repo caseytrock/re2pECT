@@ -49,7 +49,6 @@ jobs:
 
       - name: Upload SSH Key
         uses: actions/upload-artifact@v4
-        if: always()
         with:
           name: ssh-key
           path: ./ssh_artifacts/deploy_key
@@ -111,7 +110,6 @@ jobs:
         run: |
           IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
           ssh -i ~/.ssh/deploy_key ec2-user@$IP << 'EOF'
-          # Create containerd registry config
           sudo mkdir -p /etc/rancher/k3s/
           cat << 'EOL' | sudo tee /etc/rancher/k3s/registries.yaml
           mirrors:
@@ -124,12 +122,7 @@ jobs:
                 username: "${{ github.repository_owner }}"
                 password: "${{ secrets.GITHUB_TOKEN }}"
           EOL
-          
-          # Restart k3s to apply changes
           sudo systemctl restart k3s
-          
-          # Verify pull with credentials
-          sudo crictl pull --creds "${{ github.repository_owner }}:${{ secrets.GITHUB_TOKEN }}" ${{ env.DOCKER_IMAGE }}
           EOF
 
       - name: Deploy with Traefik Ingress
@@ -155,6 +148,10 @@ jobs:
                   imagePullPolicy: Always
                   ports:
                   - containerPort: ${{ env.FLASK_PORT }}
+                  resources:
+                    requests:
+                      cpu: "100m"
+                      memory: "128Mi"
                   readinessProbe:
                     httpGet:
                       path: /
@@ -208,30 +205,21 @@ jobs:
         timeout-minutes: 10
         run: |
           IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
-          # Wait for pods to be running
-          ssh -i ~/.ssh/deploy_key ec2-user@$IP \
-            "until kubectl get pods -o jsonpath='{.items[*].status.phase}' | grep -q Running; do sleep 5; echo 'Waiting for pods to be ready...'; done"
-          
-          # Wait for ingress to be available
-          ssh -i ~/.ssh/deploy_key ec2-user@$IP \
-            "until kubectl get ingress re2pect-app-ingress -o jsonpath='{.status.loadBalancer.ingress[0].ip}' &>/dev/null; do sleep 5; echo 'Waiting for ingress...'; done"
-
-      - name: Debug Pod Issues (On Failure)
-        if: failure()
-        run: |
-          IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
           ssh -i ~/.ssh/deploy_key ec2-user@$IP << 'EOF'
-          echo "=== Pod Status ==="
-          kubectl get pods -o wide
-          echo "=== Pod Details ==="
-          kubectl describe pods -l app=re2pect-app
-          echo "=== Containerd Pull Logs ==="
-          sudo crictl inspecti ${{ env.DOCKER_IMAGE }}
+          # Wait for Traefik
+          until kubectl get pods -n kube-system | grep traefik | grep -q Running; do
+            sleep 5
+            echo "Waiting for Traefik..."
+          done
+          # Wait for app pods
+          until kubectl get pods -o jsonpath='{.items[*].status.phase}' | grep -q Running; do
+            sleep 5
+            echo "Waiting for application pods..."
+          done
           EOF
 
       - name: Verify Application
         run: |
           IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
           curl -v --retry 5 --retry-delay 10 \
-            http://$IP/ \
             http://$IP.nip.io/

@@ -2,6 +2,34 @@ provider "aws" {
   region = var.aws_region
 }
 
+variable "aws_region" {
+  description = "AWS region"
+  type        = string
+  default     = "us-west-2"
+}
+
+variable "ami_id" {
+  description = "AMI ID for the EC2 instance"
+  type        = string
+}
+
+variable "instance_type" {
+  description = "EC2 instance type"
+  type        = string
+  default     = "t2.micro"
+}
+
+variable "ghcr_username" {
+  description = "GitHub username for GHCR"
+  type        = string
+}
+
+variable "ghcr_token" {
+  description = "GitHub token with packages:read"
+  type        = string
+  sensitive   = true
+}
+
 resource "tls_private_key" "flask_app_key" {
   algorithm = "RSA"
   rsa_bits  = 4096
@@ -47,11 +75,11 @@ resource "aws_security_group" "flask_app_sg" {
   }
 
   ingress {
-    description = "Internal Docker Communication"
+    description = "Internal App Communication"
     from_port   = 5000
     to_port     = 5000
     protocol    = "tcp"
-    self        = true  # Only allow within the security group
+    self        = true
   }
 
   egress {
@@ -72,10 +100,7 @@ resource "aws_instance" "flask_app" {
     set -euo pipefail
     exec > >(tee /var/log/user-data.log) 2>&1
 
-    # Install prerequisites
-    sudo yum install -y containerd
-
-    # Install k3s (defaults to containerd)
+    # Install k3s with containerd (no Docker)
     echo "=== Installing k3s with containerd ==="
     curl -sfL https://get.k3s.io | \
       INSTALL_K3S_VERSION="v1.27.6+k3s1" \
