@@ -13,6 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       ec2_ip: ${{ steps.get-outputs.outputs.public_ip }}
+      ssh_key: ${{ steps.extract-ssh-key.outputs.ssh_key }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -36,60 +37,51 @@ jobs:
         run: terraform apply -auto-approve
         working-directory: ./terraform
 
-      - name: Get Terraform Outputs
+      - name: Get Public IP
         id: get-outputs
         run: |
+          echo "public_ip=$(terraform -chdir=./terraform output -raw public_ip)" >> $GITHUB_OUTPUT
+
+      - name: Extract SSH Key
+        id: extract-ssh-key
+        run: |
+          SSH_KEY=$(terraform -chdir=./terraform output -raw ssh_private_key)
+          echo "ssh_key=${SSH_KEY}" >> $GITHUB_OUTPUT
           mkdir -p ~/.ssh
-          chmod 700 ~/.ssh
-          PUBLIC_IP=$(terraform -chdir=./terraform output -raw public_ip)
-          echo "public_ip=${PUBLIC_IP}" >> $GITHUB_OUTPUT
-          echo "EC2_IP=${PUBLIC_IP}" >> $GITHUB_ENV
-          terraform -chdir=./terraform output -raw ssh_private_key > ~/.ssh/deploy_key
+          echo "$SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
 
-      - name: Wait for Instance Readiness
+      - name: Verify SSH Access
         run: |
-          IP=${{ env.EC2_IP }}
-          until nc -z -w5 $IP 22; do sleep 10; done
+          IP=${{ steps.get-outputs.outputs.public_ip }}
+          ssh -o StrictHostKeyChecking=no \
+              -i ~/.ssh/deploy_key \
+              ec2-user@$IP \
+              "echo 'SSH connection successful!'"
 
   deploy-application:
     needs: provision-infrastructure
     runs-on: ubuntu-latest
     steps:
-      - name: Configure SSH
+      - name: Setup SSH Key
         run: |
           mkdir -p ~/.ssh
           echo "${{ needs.provision-infrastructure.outputs.ssh_key }}" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
           echo "StrictHostKeyChecking no" >> ~/.ssh/config
 
+      - name: Verify SSH Connection
+        run: |
+          ssh -i ~/.ssh/deploy_key \
+              ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} \
+              "echo 'SSH verification successful!'"
+
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Login to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v5
-        with:
-          context: ./app
-          push: true
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/re2pect-app:latest
-            ghcr.io/${{ github.repository_owner }}/re2pect-app:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
       - name: Deploy with Traefik Ingress
         run: |
-          DEPLOYMENT_YAML=$(cat <<-EOF
+          cat <<EOF > deploy.yaml
           apiVersion: apps/v1
           kind: Deployment
           metadata:
@@ -106,7 +98,7 @@ jobs:
               spec:
                 containers:
                 - name: app
-                  image: ghcr.io/${{ github.repository_owner }}/re2pect-app:${{ github.sha }}
+                  image: ghcr.io/${{ github.repository_owner }}/re2pect-app:latest
                   ports:
                   - containerPort: ${{ env.FLASK_PORT }}
           ---
@@ -139,14 +131,8 @@ jobs:
                       port:
                         number: ${{ env.FLASK_PORT }}
           EOF
-          )
-          
-          ssh -i ~/.ssh/deploy_key \
-              ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} \
-              "kubectl apply -f -" <<< "$DEPLOYMENT_YAML"
 
-      - name: Verify Deployment
-        run: |
+          scp -i ~/.ssh/deploy_key deploy.yaml ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }}:~/deploy.yaml
           ssh -i ~/.ssh/deploy_key \
               ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} \
-              "kubectl get pods,svc,ingress"
+              "kubectl apply -f deploy.yaml && kubectl get pods,svc,ingress"
