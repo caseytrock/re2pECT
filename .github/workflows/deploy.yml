@@ -17,6 +17,13 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
 
@@ -28,9 +35,6 @@ jobs:
         id: terraform-apply
         run: terraform apply -auto-approve
         working-directory: ./terraform
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY }}
 
       - name: Get Terraform Outputs and Setup SSH
         id: get-outputs
@@ -58,9 +62,12 @@ jobs:
         with:
           name: ssh-key
           path: ./ssh_artifacts/deploy_key
-          retention-days: 1  # Automatically clean up after 1 day
+          retention-days: 1
 
       - name: Wait for Instance Readiness
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY }}
         run: |
           # Wait for EC2 status checks
           INSTANCE_ID=$(terraform -chdir=./terraform output -raw instance_id)
