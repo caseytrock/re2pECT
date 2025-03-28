@@ -53,6 +53,24 @@ resource "aws_security_group" "flask_app_sg" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
+  ingress {
+    description = "HTTPS"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  
+  # INTERNAL Docker app port (only needed within the cluster)
+  ingress {
+    description = "Internal Docker app communication"
+    from_port   = 5000
+    to_port     = 5000
+    protocol    = "tcp"
+    self        = true  # Only allow traffic within this security group
+  }
+
   egress {
     from_port   = 0
     to_port     = 0

@@ -36,7 +36,7 @@ jobs:
         run: terraform apply -auto-approve
         working-directory: ./terraform
 
-      - name: Get Terraform Outputs and Setup SSH
+      - name: Get Terraform Outputs
         id: get-outputs
         run: |
           mkdir -p ~/.ssh
@@ -46,56 +46,22 @@ jobs:
           echo "EC2_IP=${PUBLIC_IP}" >> $GITHUB_ENV
           terraform -chdir=./terraform output -raw ssh_private_key > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          mkdir -p ./ssh_artifacts
-          cp ~/.ssh/deploy_key ./ssh_artifacts/
-
-      - name: Upload SSH Key Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ssh-key
-          path: ./ssh_artifacts/deploy_key
-          retention-days: 1
 
       - name: Wait for Instance Readiness
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY }}
         run: |
-          INSTANCE_ID=$(terraform -chdir=./terraform output -raw instance_id)
-          aws ec2 wait instance-status-ok \
-            --instance-ids $INSTANCE_ID \
-            --region ${{ env.AWS_REGION }}
           IP=${{ env.EC2_IP }}
           until nc -z -w5 $IP 22; do sleep 10; done
-
-      - name: Verify k3s Installation
-        run: |
-          ssh -o StrictHostKeyChecking=no \
-              -i ~/.ssh/deploy_key \
-              ec2-user@${{ env.EC2_IP }} \
-              "until kubectl get nodes >/dev/null 2>&1; do sleep 10; done"
 
   deploy-application:
     needs: provision-infrastructure
     runs-on: ubuntu-latest
     steps:
-      - name: Download SSH Key Artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: ssh-key
-          path: ~/.ssh/
-
       - name: Configure SSH
         run: |
-          chmod 700 ~/.ssh
+          mkdir -p ~/.ssh
+          echo "${{ needs.provision-infrastructure.outputs.ssh_key }}" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
           echo "StrictHostKeyChecking no" >> ~/.ssh/config
-
-      - name: Verify EC2 Access
-        run: |
-          ssh -i ~/.ssh/deploy_key \
-              ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} \
-              "echo 'SSH connection successful!'"
 
       - name: Checkout code
         uses: actions/checkout@v4
@@ -121,7 +87,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Deploy to k3s
+      - name: Deploy with Traefik Ingress
         run: |
           DEPLOYMENT_YAML=$(cat <<-EOF
           apiVersion: apps/v1
@@ -143,10 +109,44 @@ jobs:
                   image: ghcr.io/${{ github.repository_owner }}/re2pect-app:${{ github.sha }}
                   ports:
                   - containerPort: ${{ env.FLASK_PORT }}
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: re2pect-app-service
+          spec:
+            ports:
+            - port: ${{ env.FLASK_PORT }}
+              targetPort: ${{ env.FLASK_PORT }}
+            selector:
+              app: re2pect-app
+          ---
+          apiVersion: networking.k8s.io/v1
+          kind: Ingress
+          metadata:
+            name: re2pect-app-ingress
+            annotations:
+              traefik.ingress.kubernetes.io/router.entrypoints: web
+          spec:
+            rules:
+            - http:
+                paths:
+                - path: /
+                  pathType: Prefix
+                  backend:
+                    service:
+                      name: re2pect-app-service
+                      port:
+                        number: ${{ env.FLASK_PORT }}
           EOF
           )
           
-          echo "Applying deployment..."
           ssh -i ~/.ssh/deploy_key \
               ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} \
               "kubectl apply -f -" <<< "$DEPLOYMENT_YAML"
+
+      - name: Verify Deployment
+        run: |
+          ssh -i ~/.ssh/deploy_key \
+              ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} \
+              "kubectl get pods,svc,ingress"
