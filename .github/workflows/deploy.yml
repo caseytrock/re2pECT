@@ -37,37 +37,41 @@ jobs:
       - name: Get Terraform Outputs
         id: get-outputs
         run: |
-          # Get and encode outputs
-          PUBLIC_IP=$(terraform -chdir=./terraform output -raw public_ip)
-          SSH_KEY=$(terraform -chdir=./terraform output -raw ssh_private_key | base64 -w0)
-          KUBECONFIG_CMD=$(terraform -chdir=./terraform output -raw kubeconfig | base64 -w0)
+          # Create SSH directory first
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
           
+          # Get outputs
+          PUBLIC_IP=$(terraform -chdir=./terraform output -raw public_ip)
+          SSH_KEY=$(terraform -chdir=./terraform output -raw ssh_private_key)
+          KUBECONFIG_CMD=$(terraform -chdir=./terraform output -raw kubeconfig)
+          
+          # Write key to file
+          echo "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          
+          # Set outputs
           echo "public_ip=${PUBLIC_IP}" >> $GITHUB_OUTPUT
           echo "ssh_private_key=${SSH_KEY}" >> $GITHUB_OUTPUT
           echo "kubeconfig=${KUBECONFIG_CMD}" >> $GITHUB_OUTPUT
           echo "EC2_IP=${PUBLIC_IP}" >> $GITHUB_ENV
 
-          # Write key to file
-          mkdir -p ~/.ssh
-          terraform -chdir=./terraform output -raw ssh_private_key > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-
-      - name: Wait for SSH Access
+      - name: Wait for Instance Readiness
         run: |
-          IP=${{ env.EC2_IP }}
-          echo "Waiting for SSH access to ${IP}..."
+          # Wait for EC2 to pass status checks
+          INSTANCE_ID=$(terraform -chdir=./terraform output -raw instance_id)
+          aws ec2 wait instance-status-ok \
+            --instance-ids $INSTANCE_ID \
+            --region ${{ env.AWS_REGION }}
           
-          # Wait up to 5 minutes for SSH to become available
-          for i in {1..30}; do
-            if nc -z -w5 ${IP} 22; then
-              echo "SSH port is open!"
-              exit 0
-            fi
-            echo "Attempt ${i}: SSH not ready yet..."
+          # Wait for SSH to be available
+          IP=${{ env.EC2_IP }}
+          echo "Waiting for SSH on ${IP}..."
+          until nc -z -w5 $IP 22; do
             sleep 10
+            echo "Still waiting for SSH..."
           done
-          echo "Timed out waiting for SSH access"
-          exit 1
+          echo "SSH is now available!"
 
       - name: Verify k3s Installation
         run: |
@@ -76,28 +80,28 @@ jobs:
               -o ConnectTimeout=30 \
               -i ~/.ssh/deploy_key \
               ec2-user@${{ env.EC2_IP }} \
-              "until kubectl get nodes >/dev/null 2>&1; do sleep 5; done"
+              "until kubectl get nodes >/dev/null 2>&1; do sleep 10; echo 'Waiting for k3s...'; done"
           echo "k3s is ready!"
 
   deploy-application:
     needs: provision-infrastructure
     runs-on: ubuntu-latest
     steps:
-      - name: Decode SSH Key
-        id: decode-ssh-key
+      - name: Setup SSH
         run: |
-          echo "${{ needs.provision-infrastructure.outputs.ssh_key }}" | base64 -d > ~/.ssh/deploy_key
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          echo "${{ needs.provision-infrastructure.outputs.ssh_key }}" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
+          echo "StrictHostKeyChecking no" >> ~/.ssh/config
 
       - name: Verify EC2 Access
         run: |
           echo "Testing SSH connection to ${{ needs.provision-infrastructure.outputs.ec2_ip }}..."
-          ssh -o StrictHostKeyChecking=no \
-              -i ~/.ssh/deploy_key \
+          ssh -i ~/.ssh/deploy_key \
               ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} \
-              "echo 'SSH connection successful! $(hostname)'"
+              "echo 'SSH connection successful! Hostname: $(hostname)'"
 
-      # Rest of your deployment steps remain the same...
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -124,8 +128,7 @@ jobs:
 
       - name: Deploy to k3s
         run: |
-          ssh -o StrictHostKeyChecking=no \
-              -i ~/.ssh/deploy_key \
+          ssh -i ~/.ssh/deploy_key \
               ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} "
             kubectl apply -f - <<EOF
             apiVersion: apps/v1
