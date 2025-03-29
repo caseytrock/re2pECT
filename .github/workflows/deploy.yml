@@ -32,37 +32,53 @@ jobs:
         run: terraform init
         working-directory: ./terraform
 
-      - name: Terraform Apply
-        run: terraform apply -auto-approve -var="ghcr_username=${{ github.repository_owner }}" -var="ghcr_token=${{ secrets.GITHUB_TOKEN }}"
+      - name: Terraform Apply (No-Recreate)
+        run: |
+          terraform apply \
+            -auto-approve \
+            -refresh-only \
+            -var="ghcr_username=${{ github.repository_owner }}" \
+            -var="ghcr_token=${{ secrets.GITHUB_TOKEN }}"
         working-directory: ./terraform
 
       - name: Get Public IP
         id: get-outputs
         run: |
-          echo "public_ip=$(terraform -chdir=./terraform output -raw public_ip)" >> $GITHUB_OUTPUT
+          IP=$(terraform -chdir=./terraform output -raw public_ip 2>/dev/null || echo '')
+          echo "public_ip=${IP}" >> $GITHUB_OUTPUT
+          if [ -z "${IP}" ]; then
+            echo "::warning::No existing EC2 instance found. Push again to create one."
+          else
+            echo "Found existing EC2 instance: ${IP}"
+          fi
 
       - name: Prepare SSH Key
+        if: ${{ !failure() }}
         run: |
           mkdir -p ./ssh_artifacts
           terraform -chdir=./terraform output -raw ssh_private_key > ./ssh_artifacts/deploy_key
           chmod 600 ./ssh_artifacts/deploy_key
 
       - name: Upload SSH Key
+        if: ${{ !failure() }}
         uses: actions/upload-artifact@v4
         with:
           name: ssh-key
           path: ./ssh_artifacts/deploy_key
           retention-days: 1
 
-      - name: Verify Instance Readiness
-        run: |
-          IP=${{ steps.get-outputs.outputs.public_ip }}
-          until nc -z -w5 $IP 22; do sleep 10; echo "Waiting for SSH..."; done
-
   deploy-application:
     needs: provision-infrastructure
     runs-on: ubuntu-latest
     steps:
+      - name: Verify EC2 Exists
+        run: |
+          if [ -z "${{ needs.provision-infrastructure.outputs.ec2_ip }}" ]; then
+            echo "::error::No EC2 instance available. Infrastructure may need initialization - push again."
+            exit 1
+          fi
+          echo "Using EC2 instance: ${{ needs.provision-infrastructure.outputs.ec2_ip }}"
+
       - name: Download SSH Key
         uses: actions/download-artifact@v4
         with:
@@ -78,8 +94,8 @@ jobs:
       - name: Verify k3s Readiness
         run: |
           ssh -i ~/.ssh/deploy_key \
-              ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} \
-              "until kubectl get nodes &>/dev/null; do sleep 5; echo 'Waiting for k3s...'; done"
+            ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} \
+            "until kubectl get nodes &>/dev/null; do sleep 5; echo 'Waiting for k3s...'; done"
 
       - name: Checkout code
         uses: actions/checkout@v4
@@ -122,49 +138,6 @@ jobs:
           sudo systemctl restart k3s
           EOF
 
-      - name: Install and Configure Traefik
-        run: |
-          IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
-          ssh -i ~/.ssh/deploy_key ec2-user@$IP << 'EOF'
-          # Ensure Traefik is properly installed
-          sudo kubectl apply -f - <<EOL
-          apiVersion: helm.cattle.io/v1
-          kind: HelmChart
-          metadata:
-            name: traefik
-            namespace: kube-system
-          spec:
-            chart: traefik
-            repo: https://helm.traefik.io/traefik
-            targetNamespace: kube-system
-            valuesContent: |-
-              deployment:
-                kind: DaemonSet
-                hostNetwork: true
-              ports:
-                web:
-                  port: 80
-                  hostPort: 80
-                  expose: true
-                  protocol: TCP
-              service:
-                type: ClusterIP
-              providers:
-                kubernetesIngress:
-                  publishedService:
-                    enabled: true
-          EOL
-          
-          # Wait for Traefik to be ready
-          until kubectl get pods -n kube-system -l app.kubernetes.io/name=traefik | grep Running; do
-            sleep 5
-            echo "Waiting for Traefik..."
-          done
-          
-          # Verify port binding
-          sudo ss -tulnp | grep -E '80|443' || echo "Ports not bound!"
-          EOF
-
       - name: Deploy Application
         run: |
           cat <<EOF > deploy.yaml
@@ -191,8 +164,6 @@ jobs:
                     httpGet:
                       path: /
                       port: ${{ env.FLASK_PORT }}
-                    initialDelaySeconds: 10
-                    periodSeconds: 5
           ---
           apiVersion: v1
           kind: Service
@@ -232,53 +203,22 @@ jobs:
         run: |
           IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
           ssh -i ~/.ssh/deploy_key ec2-user@$IP << 'EOF'
-          # Wait for Traefik
-          kubectl wait --for=condition=ready pod -n kube-system -l app.kubernetes.io/name=traefik --timeout=180s
-          
-          # Wait for Application
-          kubectl wait --for=condition=available deployment/re2ect-app --timeout=180s
-          
-          # Verify ports
-          echo "=== Network Status ==="
-          sudo netstat -tulnp | grep -E '80|443'
-          echo "=== Traefik Status ==="
-          kubectl get svc,ingress -A
+          kubectl rollout status deployment/re2ect-app --timeout=120s
+          kubectl get pods,svc,ingress
           EOF
 
       - name: Test Application
         run: |
           IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
           echo "Testing application at http://$IP"
-          
-          # Wait for application to be responsive
-          for i in {1..30}; do
-            if curl -sSf -m 10 "http://$IP" >/dev/null; then
-              echo "Application responded successfully"
+          for i in {1..10}; do
+            if curl -fsS -m 5 "http://$IP" >/dev/null; then
+              echo "✅ Application is responding!"
               curl -v "http://$IP"
               exit 0
             fi
-            echo "Attempt $i: Waiting for application to respond..."
+            echo "Attempt $i: Application not yet ready..."
             sleep 5
           done
-          
-          echo "Application did not become responsive after 30 attempts"
+          echo "❌ Application did not respond after 10 attempts"
           exit 1
-
-      - name: Debug on Failure
-        if: ${{ failure() }}
-        run: |
-          IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
-          echo "=== Debug Information ==="
-          echo "Port check:"
-          nc -zv $IP 80 || echo "Port 80 not accessible"
-          echo "Curl verbose output:"
-          curl -v "http://$IP" || true
-          echo "Traefik logs:"
-          ssh -i ~/.ssh/deploy_key ec2-user@$IP \
-            "kubectl logs -n kube-system -l app.kubernetes.io/name=traefik --tail=50"
-          echo "Application logs:"
-          ssh -i ~/.ssh/deploy_key ec2-user@$IP \
-            "kubectl logs deployment/re2ect-app --tail=20"
-          echo "Cluster events:"
-          ssh -i ~/.ssh/deploy_key ec2-user@$IP \
-            "kubectl get events -A --sort-by=.metadata.creationTimestamp"

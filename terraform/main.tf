@@ -67,6 +67,16 @@ resource "aws_instance" "flask_app" {
   instance_type = var.instance_type
   key_name      = aws_key_pair.flask_app_key_pair.key_name
 
+  # Add these lifecycle rules to prevent recreation:
+  lifecycle {
+    prevent_destroy = true
+    ignore_changes = [
+      ami,          # Allow AMI updates without recreation
+      user_data,    # Allow user_data changes
+      tags          # Allow tag updates
+    ]
+  }
+
   user_data = <<-EOF
     #!/bin/bash
     set -euo pipefail
