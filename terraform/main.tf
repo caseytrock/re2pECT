@@ -63,80 +63,120 @@ resource "aws_security_group" "flask_app_sg" {
 }
 
 resource "aws_instance" "flask_app" {
-  ami           = var.ami_id
-  instance_type = var.instance_type
-  key_name      = aws_key_pair.flask_app_key_pair.key_name
-
   user_data = <<-EOF
     #!/bin/bash
-    set -euo pipefail
-    exec > >(tee /var/log/user-data.log) 2>&1
+    set -exuo pipefail
+    exec > >(tee /var/log/user-data-debug.log) 2>&1
 
-    # Free up port 80
-    sudo systemctl stop nginx 2>/dev/null || true
-    sudo systemctl stop apache2 2>/dev/null || true
-    sudo pkill -f ":80" || true
+    echo "=== PHASE 1: SYSTEM PREP ==="
+    echo "Freeing port 80..."
+    sudo ss -tulnp | grep ':80' || echo "No processes on port 80"
+    sudo systemctl stop nginx apache2 httpd || echo "No web servers to stop"
+    sudo pkill -f ":80" || echo "No processes to kill on port 80"
+    sudo ss -tulnp | grep ':80' && { echo "Port 80 still in use!"; exit 1; } || echo "Port 80 cleared"
 
-    # Install minimal k3s
+    echo "=== PHASE 2: K3S INSTALLATION ==="
+    echo "Installing k3s..."
     curl -sfL https://get.k3s.io | \
       INSTALL_K3S_VERSION="v1.27.6+k3s1" \
       K3S_KUBECONFIG_MODE="644" \
       sh -s - server \
-              --disable servicelb \
-              --disable local-storage \
-              --disable metrics-server \
               --disable traefik \
+              --disable servicelb \
+              --disable metrics-server \
               --disable helm-controller \
-              --disable-network-policy \
-              --disable coredns \
               --flannel-backend=none \
-              --kubelet-arg="serialize-image-pulls=false"
+              --kubelet-arg="v=4"  # Enable verbose logging
 
-    # Install minimal Traefik
-    sudo mkdir -p /var/lib/rancher/k3s/server/manifests
-    cat <<'EOL' | sudo tee /var/lib/rancher/k3s/server/manifests/traefik.yaml
+    echo "Verifying k3s..."
+    until kubectl cluster-info; do
+      echo "k3s not ready yet..."
+      journalctl -u k3s -n 20 --no-pager
+      sleep 10
+    done
+
+    echo "=== PHASE 3: TRAEFIK INSTALLATION ==="
+    echo "Creating traefik namespace..."
+    kubectl create namespace traefik --dry-run=client -o yaml | kubectl apply -f -
+    kubectl get ns traefik || { echo "Failed to create namespace!"; exit 1; }
+
+    echo "Applying Traefik deployment..."
+    cat <<DEBUG | kubectl apply -f -
     apiVersion: apps/v1
     kind: Deployment
     metadata:
-      name: traefik
-      namespace: kube-system
+      name: traefik-debug
+      namespace: traefik
+      labels:
+        app: traefik-debug
     spec:
       replicas: 1
       selector:
         matchLabels:
-          app: traefik
+          app: traefik-debug
       template:
         metadata:
           labels:
-            app: traefik
+            app: traefik-debug
+          annotations:
+            debug: "true"
         spec:
           containers:
           - name: traefik
             image: traefik:v2.10
             args:
+              - --log.level=DEBUG
               - --entryPoints.web.address=:80
               - --providers.kubernetesingress
             ports:
-              - containerPort: 80
-                hostPort: 80
-                name: web
-            resources:
-              requests:
-                cpu: "20m"
-                memory: "30Mi"
+            - containerPort: 80
+              hostPort: 80
+              name: web
+            readinessProbe:
+              httpGet:
+                path: /ping
+                port: 80
+              initialDelaySeconds: 5
+              periodSeconds: 5
           hostNetwork: true
-    EOL
+    DEBUG
 
-    # Wait for Traefik
-    until kubectl get pods -n kube-system -l app=traefik 2>/dev/null | grep -q Running; do
-      echo "Waiting for Traefik..."
-      kubectl get pods -n kube-system -l app=traefik || true
-      sleep 10
+    echo "=== PHASE 4: VERIFICATION ==="
+    echo "Waiting for Traefik pod..."
+    for i in {1..30}; do
+      POD_STATUS=$(kubectl -n traefik get pod -l app=traefik-debug -o jsonpath='{.items[0].status.phase}' 2>/dev/null || echo "Missing")
+      echo "[Attempt $i/30] Pod status: $POD_STATUS"
+      
+      if [ "$POD_STATUS" = "Running" ]; then
+        echo "Traefik is running!"
+        break
+      fi
+      
+      # Debug output if not running
+      kubectl -n traefik get events --sort-by='.lastTimestamp' | tail -n 5
+      kubectl -n traefik describe pod -l app=traefik-debug || true
+      sleep 5
     done
-  EOF
 
-  vpc_security_group_ids = [aws_security_group.flask_app_sg.id]
-  tags = {
-    Name = "flask-app-instance"
-  }
+    if [ "$POD_STATUS" != "Running" ]; then
+      echo "=== FAILURE DEBUG ==="
+      echo "Final pod state:"
+      kubectl -n traefik describe pod -l app=traefik-debug
+      echo "Traefik logs:"
+      kubectl -n traefik logs -l app=traefik-debug --tail=50 || true
+      echo "System diagnostics:"
+      journalctl -u k3s -n 50 --no-pager
+      sudo netstat -tulnp
+      exit 1
+    fi
+
+    echo "=== FINAL VERIFICATION ==="
+    echo "Testing Traefik connectivity..."
+    curl -v --retry 10 --retry-delay 5 http://localhost || {
+      echo "Failed to connect to Traefik"
+      exit 1
+    }
+
+    echo "=== INSTALLATION COMPLETE ==="
+  EOF
 }

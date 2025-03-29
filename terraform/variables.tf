@@ -13,7 +13,7 @@ variable "ami_id" {
 variable "instance_type" {
   description = "EC2 instance type"
   type        = string
-  default     = "t3.small" # Minimum recommended for k3s
+  default     = "t2.micro" # Minimum recommended for k3s
 }
 
 variable "ghcr_username" {
