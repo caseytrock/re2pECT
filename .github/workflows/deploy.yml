@@ -150,17 +150,16 @@ jobs:
                   - containerPort: ${{ env.FLASK_PORT }}
                   readinessProbe:
                     httpGet:
-                      path: /health  # Use dedicated health endpoint
+                      path: /health
                       port: 5000
-                    initialDelaySeconds: 5
+                    initialDelaySeconds: 20  # Increased from 5
                     periodSeconds: 5
-                    timeoutSeconds: 1
-
+                    failureThreshold: 3
                   livenessProbe:
                     httpGet:
                       path: /health
                       port: 5000
-                    initialDelaySeconds: 10
+                    initialDelaySeconds: 30  # Increased from 10
                     periodSeconds: 10
                   resources:
                     limits:
@@ -218,35 +217,32 @@ jobs:
         run: |
           IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
           echo "Testing application at http://$IP"
-          # Wait for Traefik to be ready
+          
+          # Get Traefik logs for debugging
           ssh -i ~/.ssh/deploy_key ec2-user@$IP \
-            "sudo kubectl wait --for=condition=ready pod -n kube-system -l app.kubernetes.io/name=traefik --timeout=180s"
-
-          # Add retry logic here
-          for i in {1..10}; do
-            if curl -sf -m 5 "http://$IP"; then
-              exit 0
-            fi
-            sleep 5
-          done
+            "kubectl logs -n kube-system -l app.kubernetes.io/name=traefik --tail=50"
           
-          # Wait for Traefik to route traffic
+          # Extended test with detailed output
           for i in {1..30}; do
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" -m 5 "http://$IP")
-            if [ "$STATUS" = "200" ]; then
-              echo "✅ Application responded with HTTP 200"
-              curl -v "http://$IP"  # Debug output
+            RESPONSE=$(curl -sS -m 10 -v "http://$IP" 2>&1 || true)
+            
+            if echo "$RESPONSE" | grep -q "HTTP/1.1 200"; then
+              echo "✅ Application responded successfully"
+              echo "$RESPONSE"
               exit 0
             fi
-            echo "Attempt $i: HTTP $STATUS, waiting..."
+            
+            echo "Attempt $i - Waiting for application..."
+            echo "$RESPONSE"
             sleep 5
           done
           
-          # Debug output on failure
-          echo "❌ Application did not return 200 OK"
+          # Final debug output
+          echo "❌ Application failed to respond"
           ssh -i ~/.ssh/deploy_key ec2-user@$IP << 'EOF'
-          kubectl get pods,svc,ingress -A
-          kubectl logs -n kube-system -l app.kubernetes.io/name=traefik --tail=50
-          kubectl logs deployment/re2ect-app --tail=50
+          kubectl get pods,svc,ingress -A -o wide
+          kubectl describe ingress re2pect-app-ingress
+          kubectl logs -n kube-system -l app.kubernetes.io/name=traefik --tail=100
+          kubectl logs deployment/re2pect-app --tail=100
           EOF
           exit 1

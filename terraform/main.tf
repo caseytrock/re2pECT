@@ -51,7 +51,7 @@ resource "aws_security_group" "flask_app_sg" {
     from_port   = 5000
     to_port     = 5000
     protocol    = "tcp"
-    self        = true
+    cidr_blocks = ["172.31.0.0/16"]  # Only allow within VPC
   }
 
   egress {
@@ -82,17 +82,20 @@ resource "aws_instance" "flask_app" {
         protocol: TCP
     EOL
 
-    # Install k3s with built-in Traefik (lightweight config)
     curl -sfL https://get.k3s.io | \
       INSTALL_K3S_VERSION="v1.27.6+k3s1" \
       K3S_KUBECONFIG_MODE="644" \
       sh -s - --write-kubeconfig-mode 644 \
               --disable servicelb \
               --disable local-storage \
-              --disable metrics-server
+              --disable metrics-server \
+              --traefik \
+              --traefik-config-arg="ports.web.expose=true" \
+              --traefik-config-arg="ports.web.exposedPort=80"
 
-    # Configure Traefik via k3s addon (not Helm)
-    sudo cat << 'EOL' > /var/lib/rancher/k3s/server/manifests/traefik-config.yaml
+    # Create Traefik config
+    sudo mkdir -p /var/lib/rancher/k3s/server/manifests
+    cat << 'EOL' | sudo tee /var/lib/rancher/k3s/server/manifests/traefik-config.yaml
     apiVersion: helm.cattle.io/v1
     kind: HelmChartConfig
     metadata:
@@ -105,6 +108,13 @@ resource "aws_instance" "flask_app" {
             port: 80
             hostPort: 80
         hostNetwork: true
+        logs:
+          general:
+            level: DEBUG
+        providers:
+          kubernetesIngress:
+            publishedService:
+              enabled: true
     EOL
 
     # Wait for cluster
