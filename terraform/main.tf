@@ -145,17 +145,4 @@ resource "aws_instance" "flask_app" {
   tags = {
     Name = "flask-app-instance"
   }
-
-  provisioner "remote-exec" {
-    inline = [
-      "sudo cloud-init status --wait",  # Wait for cloud-init
-      "until kubectl cluster-info &> /dev/null; do sleep 5; done"  # Wait for k3s
-    ]
-    connection {
-      type        = "ssh"
-      user        = "ec2-user"
-      private_key = tls_private_key.flask_app_key.private_key_pem
-      host        = self.public_ip
-    }
-  }
 }
