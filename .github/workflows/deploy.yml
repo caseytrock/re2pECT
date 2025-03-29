@@ -148,6 +148,20 @@ jobs:
                   imagePullPolicy: Always
                   ports:
                   - containerPort: ${{ env.FLASK_PORT }}
+                  readinessProbe:
+                    httpGet:
+                      path: /health  # Use dedicated health endpoint
+                      port: 5000
+                    initialDelaySeconds: 5
+                    periodSeconds: 5
+                    timeoutSeconds: 1
+
+                livenessProbe:
+                  httpGet:
+                    path: /health
+                    port: 5000
+                  initialDelaySeconds: 10
+                  periodSeconds: 10
                   resources:
                     limits:
                       cpu: "500m"
@@ -187,7 +201,7 @@ jobs:
 
           scp -i ~/.ssh/deploy_key deploy.yaml ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }}:~/ 
           ssh -i ~/.ssh/deploy_key ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} \
-            "kubectl apply -f deploy.yaml && sleep 10"
+            "kubectl apply -f deploy.yaml && sleep 20"
 
       - name: Verify Deployment
         run: |
@@ -201,14 +215,25 @@ jobs:
       - name: Test Application
         run: |
           IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
-          for i in {1..10}; do
+          echo "Testing application at http://$IP"
+          
+          # Wait for Traefik to route traffic
+          for i in {1..30}; do
             STATUS=$(curl -s -o /dev/null -w "%{http_code}" -m 5 "http://$IP")
             if [ "$STATUS" = "200" ]; then
               echo "✅ Application responded with HTTP 200"
+              curl -v "http://$IP"  # Debug output
               exit 0
             fi
             echo "Attempt $i: HTTP $STATUS, waiting..."
-            sleep 10
+            sleep 5
           done
+          
+          # Debug output on failure
           echo "❌ Application did not return 200 OK"
+          ssh -i ~/.ssh/deploy_key ec2-user@$IP << 'EOF'
+          kubectl get pods,svc,ingress -A
+          kubectl logs -n kube-system -l app.kubernetes.io/name=traefik --tail=50
+          kubectl logs deployment/re2ect-app --tail=50
+          EOF
           exit 1
