@@ -194,8 +194,7 @@ jobs:
               traefik.ingress.kubernetes.io/router.entrypoints: web
           spec:
             rules:
-            - host: "${{ needs.provision-infrastructure.outputs.ec2_ip }}.nip.io"
-              http:
+            - http:
                 paths:
                 - path: /
                   pathType: Prefix
@@ -208,7 +207,7 @@ jobs:
 
           scp -i ~/.ssh/deploy_key deploy.yaml ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }}:~/ 
           ssh -i ~/.ssh/deploy_key ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} \
-            "kubectl apply -f deploy.yaml"
+              "kubectl apply -f deploy.yaml"
 
       - name: Verify Deployment
         run: |
