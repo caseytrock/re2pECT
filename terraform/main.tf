@@ -63,6 +63,10 @@ resource "aws_security_group" "flask_app_sg" {
 }
 
 resource "aws_instance" "flask_app" {
+  ami           = var.ami_id
+  instance_type = var.instance_type
+  key_name      = aws_key_pair.flask_app_key_pair.key_name
+
   user_data = <<-EOF
     #!/bin/bash
     set -exuo pipefail
