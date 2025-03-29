@@ -101,7 +101,7 @@ helm install traefik traefik/traefik \
   --namespace kube-system \
   --set ports.web.exposedPort=80 \
   --set hostNetwork=true
-EOF
+EOL
 
     # Create Traefik config
     sudo mkdir -p /var/lib/rancher/k3s/server/manifests
