@@ -32,25 +32,31 @@ jobs:
         run: terraform init
         working-directory: ./terraform
 
-      - name: Terraform Apply (No-Recreate)
+      - name: Terraform Apply (Smart Update)
+        id: tf-apply
         run: |
-          terraform apply \
-            -auto-approve \
-            -refresh-only \
-            -var="ghcr_username=${{ github.repository_owner }}" \
-            -var="ghcr_token=${{ secrets.GITHUB_TOKEN }}"
+          # First try refresh-only to preserve existing infrastructure
+          if terraform apply -refresh-only -auto-approve \
+              -var="ghcr_username=${{ github.repository_owner }}" \
+              -var="ghcr_token=${{ secrets.GITHUB_TOKEN }}" \
+              -input=false; then
+            echo "Existing infrastructure refreshed"
+          else
+            # If refresh fails, do a normal apply (for first-time setup)
+            echo "Performing full apply..."
+            terraform apply -auto-approve \
+              -var="ghcr_username=${{ github.repository_owner }}" \
+              -var="ghcr_token=${{ secrets.GITHUB_TOKEN }}" \
+              -input=false
+          fi
         working-directory: ./terraform
 
       - name: Get Public IP
         id: get-outputs
         run: |
-          IP=$(terraform -chdir=./terraform output -raw public_ip 2>/dev/null || echo '')
+          IP=$(terraform -chdir=./terraform output -raw public_ip)
           echo "public_ip=${IP}" >> $GITHUB_OUTPUT
-          if [ -z "${IP}" ]; then
-            echo "::warning::No existing EC2 instance found. Push again to create one."
-          else
-            echo "Found existing EC2 instance: ${IP}"
-          fi
+          echo "Using EC2 instance: ${IP}"
 
       - name: Prepare SSH Key
         if: ${{ !failure() }}
