@@ -186,6 +186,8 @@ jobs:
           kind: Ingress
           metadata:
             name: re2pect-app-ingress
+            annotations:
+              traefik.ingress.kubernetes.io/router.entrypoints: web
           spec:
             rules:
             - http:
