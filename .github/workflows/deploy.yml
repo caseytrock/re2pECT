@@ -65,6 +65,15 @@ jobs:
     needs: provision-infrastructure
     runs-on: ubuntu-latest
     steps:
+      - name: Wait for EC2 Initialization
+        run: |
+          IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
+          until ssh -i ~/.ssh/deploy_key ec2-user@$IP \
+            "sudo cloud-init status | grep -q 'done'"; do
+            sleep 10
+            echo "Waiting for cloud-init..."
+          done
+
       - name: Verify EC2 Exists
         run: |
           if [ -z "${{ needs.provision-infrastructure.outputs.ec2_ip }}" ]; then
@@ -218,6 +227,17 @@ jobs:
         run: |
           IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
           echo "Testing application at http://$IP"
+          # Wait for Traefik to be ready
+          ssh -i ~/.ssh/deploy_key ec2-user@$IP \
+            "sudo kubectl wait --for=condition=ready pod -n kube-system -l app.kubernetes.io/name=traefik --timeout=180s"
+
+          # Add retry logic here
+          for i in {1..10}; do
+            if curl -sf -m 5 "http://$IP"; then
+              exit 0
+            fi
+            sleep 5
+          done
           
           # Wait for Traefik to route traffic
           for i in {1..30}; do
