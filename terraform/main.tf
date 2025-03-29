@@ -89,8 +89,26 @@ resource "aws_instance" "flask_app" {
       sh -s - --write-kubeconfig-mode 644 \
               --disable servicelb \
               --disable local-storage \
-              --disable metrics-server \
-              --traefik-config /etc/rancher/k3s/traefik-config.yaml
+              --disable metrics-server
+
+    # Configure Traefik via k3s addon (not Helm)
+    sudo cat << 'EOL' > /var/lib/rancher/k3s/server/manifests/traefik-config.yaml
+    apiVersion: helm.cattle.io/v1
+    kind: HelmChartConfig
+    metadata:
+      name: traefik
+      namespace: kube-system
+    spec:
+      valuesContent: |-
+        ports:
+          web:
+            port: 80
+            hostPort: 80
+        hostNetwork: true
+    EOL
+
+    # Wait for cluster
+    until kubectl cluster-info; do sleep 5; done
 
     # Configure GHCR authentication
     sudo mkdir -p /etc/rancher/k3s/
