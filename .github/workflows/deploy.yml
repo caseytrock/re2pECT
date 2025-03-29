@@ -65,15 +65,6 @@ jobs:
     needs: provision-infrastructure
     runs-on: ubuntu-latest
     steps:
-      - name: Wait for EC2 Initialization
-        run: |
-          IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
-          until ssh -i ~/.ssh/deploy_key ec2-user@$IP \
-            "sudo cloud-init status | grep -q 'done'"; do
-            sleep 10
-            echo "Waiting for cloud-init..."
-          done
-
       - name: Verify EC2 Exists
         run: |
           if [ -z "${{ needs.provision-infrastructure.outputs.ec2_ip }}" ]; then
@@ -93,6 +84,16 @@ jobs:
           chmod 700 ~/.ssh
           chmod 600 ~/.ssh/deploy_key
           echo "StrictHostKeyChecking no" >> ~/.ssh/config
+
+      
+      - name: Wait for EC2 Initialization
+        run: |
+          IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
+          until ssh -i ~/.ssh/deploy_key ec2-user@$IP \
+            "sudo cloud-init status | grep -q 'done'"; do
+            sleep 10
+            echo "Waiting for cloud-init..."
+          done
 
       - name: Verify k3s Readiness
         run: |
