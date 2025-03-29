@@ -85,7 +85,12 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           echo "StrictHostKeyChecking no" >> ~/.ssh/config
 
-      
+      - name: Verify k3s Readiness
+        run: |
+          ssh -i ~/.ssh/deploy_key \
+            ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} \
+            "until kubectl cluster-info &>/dev/null; do sleep 10; echo 'Waiting for k3s API...'; done"
+
       - name: Wait for EC2 Initialization
         run: |
           IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
@@ -95,11 +100,7 @@ jobs:
             echo "Waiting for cloud-init..."
           done
 
-      - name: Verify k3s Readiness
-        run: |
-          ssh -i ~/.ssh/deploy_key \
-            ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} \
-            "until kubectl cluster-info &>/dev/null; do sleep 10; echo 'Waiting for k3s API...'; done"
+
 
       - name: Checkout code
         uses: actions/checkout@v4
