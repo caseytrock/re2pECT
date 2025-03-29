@@ -99,7 +99,7 @@ jobs:
         run: |
           ssh -i ~/.ssh/deploy_key \
             ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} \
-            "until kubectl get nodes &>/dev/null; do sleep 5; echo 'Waiting for k3s...'; done"
+            "until kubectl cluster-info &>/dev/null; do sleep 5; echo 'Waiting for k3s API...'; done"
 
       - name: Checkout code
         uses: actions/checkout@v4
@@ -123,34 +123,14 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Configure GHCR Auth for Containerd
-        run: |
-          IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
-          ssh -i ~/.ssh/deploy_key ec2-user@$IP << 'EOF'
-          sudo mkdir -p /etc/rancher/k3s/
-          cat << 'EOL' | sudo tee /etc/rancher/k3s/registries.yaml
-          mirrors:
-            ghcr.io:
-              endpoint:
-                - "https://ghcr.io"
-          configs:
-            "ghcr.io":
-              auth:
-                username: "${{ github.repository_owner }}"
-                password: "${{ secrets.GITHUB_TOKEN }}"
-          EOL
-          sudo systemctl restart k3s
-          EOF
-
       - name: Install and Configure Traefik
         run: |
           IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
           ssh -i ~/.ssh/deploy_key ec2-user@$IP << 'EOF'
-          # Remove any existing Traefik installation
-          sudo kubectl delete -n kube-system helmchart traefik --ignore-not-found
-          sleep 5
-      
-          # Install Traefik with proper port binding
+          # Wait for k3s to be fully ready
+          until kubectl cluster-info; do sleep 5; echo "Waiting for k3s API..."; done
+
+          # Install Traefik using Helm (k3s has built-in Helm support)
           sudo kubectl apply -f - <<EOL
           apiVersion: helm.cattle.io/v1
           kind: HelmChart
@@ -165,15 +145,10 @@ jobs:
               deployment:
                 kind: DaemonSet
                 hostNetwork: true
-                hostPort:
-                  enabled: true
               ports:
                 web:
                   port: 80
                   hostPort: 80
-                  expose: true
-                  exposedPort: 80
-                  protocol: TCP
               service:
                 type: ClusterIP
               providers:
@@ -182,37 +157,20 @@ jobs:
                     enabled: true
               additionalArguments:
                 - --entrypoints.web.address=:80
-                - --entrypoints.web.http.redirections.entryPoint.to=:80
-                - --entrypoints.web.http.redirections.entryPoint.scheme=https
           EOL
-      
-          # Wait for Traefik pod
-          until kubectl get pods -n kube-system -l app.kubernetes.io/name=traefik | grep Running; do
-            sleep 5
-            echo "Waiting for Traefik pod..."
-          done
-      
-          # Verify port binding
-          echo "Checking port 80 binding..."
-          if ! sudo netstat -tulnp | grep -E ':80\s'; then
-            echo "Traefik failed to bind to port 80. Checking logs..."
-            kubectl logs -n kube-system -l app.kubernetes.io/name=traefik
-            exit 1
-          fi
-          EOF
 
-      - name: Verify Network Configuration
-        run: |
-          IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
-          ssh -i ~/.ssh/deploy_key ec2-user@$IP << 'EOF'
-          echo "=== Network Status ==="
-          sudo ss -tulnp | grep -E '80|443'
-          echo "=== Traefik Pod ==="
-          kubectl get pods -n kube-system -l app.kubernetes.io/name=traefik -o wide
-          echo "=== Traefik Service ==="
-          kubectl get svc -n kube-system traefik
-          echo "=== Traefik Logs (last 20 lines) ==="
-          kubectl logs -n kube-system -l app.kubernetes.io/name=traefik --tail=20
+          # Wait for Traefik pod
+          echo "Waiting for Traefik to be ready..."
+          kubectl wait --namespace kube-system \
+            --for=condition=ready pod \
+            --selector=app.kubernetes.io/name=traefik \
+            --timeout=180s
+
+          # Verify Traefik is working
+          echo "Traefik pods:"
+          kubectl get pods -n kube-system -l app.kubernetes.io/name=traefik
+          echo "Traefik services:"
+          kubectl get svc -n kube-system -l app.kubernetes.io/name=traefik
           EOF
 
       - name: Deploy Application
@@ -241,12 +199,15 @@ jobs:
                     httpGet:
                       path: /
                       port: ${{ env.FLASK_PORT }}
+                    initialDelaySeconds: 10
+                    periodSeconds: 5
           ---
           apiVersion: v1
           kind: Service
           metadata:
             name: re2ect-app-service
           spec:
+            type: ClusterIP
             ports:
             - port: 80
               targetPort: ${{ env.FLASK_PORT }}
@@ -274,7 +235,7 @@ jobs:
 
           scp -i ~/.ssh/deploy_key deploy.yaml ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }}:~/ 
           ssh -i ~/.ssh/deploy_key ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} \
-            "kubectl apply -f deploy.yaml"
+            "kubectl apply -f deploy.yaml && sleep 10"
 
       - name: Verify Deployment
         run: |
@@ -297,7 +258,7 @@ jobs:
           fi
           
           # Then check application response
-          for i in {1..15}; do
+          for i in {1..20}; do
             STATUS=$(curl -s -o /dev/null -w "%{http_code}" -m 5 "http://$IP")
             if [ "$STATUS" = "200" ]; then
               echo "✅ Application responded with HTTP 200"
@@ -308,7 +269,7 @@ jobs:
             sleep 5
           done
           
-          echo "❌ Application did not return 200 OK after 15 attempts"
+          echo "❌ Application did not return 200 OK after 20 attempts"
           exit 1
 
       - name: Debug on Failure
@@ -325,7 +286,7 @@ jobs:
             "kubectl logs -n kube-system -l app.kubernetes.io/name=traefik --tail=50"
           echo "Application logs:"
           ssh -i ~/.ssh/deploy_key ec2-user@$IP \
-            "kubectl logs deployment/re2ect-app --tail=20"
+            "kubectl logs deployment/re2ect-app --tail=50"
           echo "Cluster events:"
           ssh -i ~/.ssh/deploy_key ec2-user@$IP \
             "kubectl get events -A --sort-by=.metadata.creationTimestamp"

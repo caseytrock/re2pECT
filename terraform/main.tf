@@ -67,13 +67,12 @@ resource "aws_instance" "flask_app" {
   instance_type = var.instance_type
   key_name      = aws_key_pair.flask_app_key_pair.key_name
 
-  # Add these lifecycle rules to prevent recreation:
   lifecycle {
     prevent_destroy = true
     ignore_changes = [
-      ami,          # Allow AMI updates without recreation
-      user_data,    # Allow user_data changes
-      tags          # Allow tag updates
+      ami,
+      user_data,
+      tags
     ]
   }
 
@@ -87,7 +86,7 @@ resource "aws_instance" "flask_app" {
     curl -sfL https://get.k3s.io | \
       INSTALL_K3S_VERSION="v1.27.6+k3s1" \
       K3S_KUBECONFIG_MODE="644" \
-      sh -s -
+      sh -s - --write-kubeconfig-mode 644
 
     # Configure GHCR authentication for containerd
     echo "=== Configuring containerd for GHCR ==="
@@ -113,11 +112,12 @@ resource "aws_instance" "flask_app" {
     chmod +x kubectl
     sudo mv kubectl /usr/local/bin/
 
-    # Configure kubeconfig
+    # Configure kubeconfig for remote access
     echo "=== Configuring kubeconfig ==="
     mkdir -p /home/ec2-user/.kube
     sudo cp /etc/rancher/k3s/k3s.yaml /home/ec2-user/.kube/config
     sudo chown ec2-user:ec2-user /home/ec2-user/.kube/config
+    sed -i "s/127.0.0.1/$(curl -s http://169.254.169.254/latest/meta-data/local-ipv4)/g" /home/ec2-user/.kube/config
 
     # Verify cluster
     echo "=== Waiting for cluster ==="
@@ -128,4 +128,13 @@ resource "aws_instance" "flask_app" {
   tags = {
     Name = "flask-app-instance"
   }
+}
+
+output "public_ip" {
+  value = aws_instance.flask_app.public_ip
+}
+
+output "ssh_private_key" {
+  value     = tls_private_key.flask_app_key.private_key_pem
+  sensitive = true
 }
