@@ -218,31 +218,35 @@ jobs:
           IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
           echo "Testing application at http://$IP"
           
-          # Get Traefik logs for debugging
-          ssh -i ~/.ssh/deploy_key ec2-user@$IP \
-            "kubectl logs -n kube-system -l app.kubernetes.io/name=traefik --tail=50"
-          
-          # Extended test with detailed output
-          for i in {1..30}; do
-            RESPONSE=$(curl -sS -m 10 -v "http://$IP" 2>&1 || true)
-            
-            if echo "$RESPONSE" | grep -q "HTTP/1.1 200"; then
-              echo "✅ Application responded successfully"
-              echo "$RESPONSE"
-              exit 0
-            fi
-            
-            echo "Attempt $i - Waiting for application..."
-            echo "$RESPONSE"
+          # Wait for Traefik to be fully ready (both pod and service)
+          ssh -i ~/.ssh/deploy_key ec2-user@$IP << 'EOF'
+          set -e
+          echo "Waiting for Traefik pod..."
+          kubectl wait --for=condition=ready pod -n kube-system -l app.kubernetes.io/name=traefik --timeout=180s
+          echo "Waiting for Traefik service..."
+          until kubectl get svc -n kube-system traefik -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' | grep -q .; do
             sleep 5
           done
+          EOF
           
-          # Final debug output
+          # Test with retries and debug output
+          for i in {1..10}; do
+            if curl -fsS "http://$IP" >/dev/null; then
+              echo "✅ Application is responding!"
+              curl -v "http://$IP"
+              exit 0
+            fi
+            echo "Attempt $i/10 - Application not ready yet..."
+            ssh -i ~/.ssh/deploy_key ec2-user@$IP "kubectl get pods,svc,ingress -A"
+            sleep 10
+          done
+          
+          # Debug output if failed
           echo "❌ Application failed to respond"
           ssh -i ~/.ssh/deploy_key ec2-user@$IP << 'EOF'
-          kubectl get pods,svc,ingress -A -o wide
+          kubectl describe pod -n kube-system -l app.kubernetes.io/name=traefik
+          kubectl logs -n kube-system -l app.kubernetes.io/name=traefik
           kubectl describe ingress re2pect-app-ingress
-          kubectl logs -n kube-system -l app.kubernetes.io/name=traefik --tail=100
-          kubectl logs deployment/re2pect-app --tail=100
+          kubectl get events -A --sort-by='.lastTimestamp'
           EOF
           exit 1
