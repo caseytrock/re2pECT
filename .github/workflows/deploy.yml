@@ -146,7 +146,11 @@ jobs:
         run: |
           IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
           ssh -i ~/.ssh/deploy_key ec2-user@$IP << 'EOF'
-          # Ensure Traefik is properly installed
+          # Remove any existing Traefik installation
+          sudo kubectl delete -n kube-system helmchart traefik --ignore-not-found
+          sleep 5
+      
+          # Install Traefik with proper port binding
           sudo kubectl apply -f - <<EOL
           apiVersion: helm.cattle.io/v1
           kind: HelmChart
@@ -161,11 +165,14 @@ jobs:
               deployment:
                 kind: DaemonSet
                 hostNetwork: true
+                hostPort:
+                  enabled: true
               ports:
                 web:
                   port: 80
                   hostPort: 80
                   expose: true
+                  exposedPort: 80
                   protocol: TCP
               service:
                 type: ClusterIP
@@ -173,19 +180,25 @@ jobs:
                 kubernetesIngress:
                   publishedService:
                     enabled: true
+              additionalArguments:
+                - --entrypoints.web.address=:80
+                - --entrypoints.web.http.redirections.entryPoint.to=:80
+                - --entrypoints.web.http.redirections.entryPoint.scheme=https
           EOL
-          
-          # Wait for Traefik to be ready
+      
+          # Wait for Traefik pod
           until kubectl get pods -n kube-system -l app.kubernetes.io/name=traefik | grep Running; do
             sleep 5
-            echo "Waiting for Traefik..."
+            echo "Waiting for Traefik pod..."
           done
-          
+      
           # Verify port binding
-          until sudo netstat -tulnp | grep -E ':80\s.*traefik'; do
-            sleep 3
-            echo "Waiting for Traefik to bind to port 80..."
-          done
+          echo "Checking port 80 binding..."
+          if ! sudo netstat -tulnp | grep -E ':80\s'; then
+            echo "Traefik failed to bind to port 80. Checking logs..."
+            kubectl logs -n kube-system -l app.kubernetes.io/name=traefik
+            exit 1
+          fi
           EOF
 
       - name: Verify Network Configuration
@@ -193,11 +206,13 @@ jobs:
           IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
           ssh -i ~/.ssh/deploy_key ec2-user@$IP << 'EOF'
           echo "=== Network Status ==="
-          sudo netstat -tulnp | grep -E '80|443'
+          sudo ss -tulnp | grep -E '80|443'
           echo "=== Traefik Pod ==="
           kubectl get pods -n kube-system -l app.kubernetes.io/name=traefik -o wide
-          echo "=== Traefik Logs ==="
-          kubectl logs -n kube-system -l app.kubernetes.io/name=traefik --tail=50
+          echo "=== Traefik Service ==="
+          kubectl get svc -n kube-system traefik
+          echo "=== Traefik Logs (last 20 lines) ==="
+          kubectl logs -n kube-system -l app.kubernetes.io/name=traefik --tail=20
           EOF
 
       - name: Deploy Application
@@ -275,21 +290,21 @@ jobs:
           IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
           echo "Testing application at http://$IP"
           
-          # First verify basic port connectivity
-          if ! nc -zv -w 5 $IP 80; then
-            echo "❌ Port 80 not accessible"
+          # First check if Traefik is responding
+          if ! curl -I -m 5 "http://$IP" 2>/dev/null | grep -q "HTTP/"; then
+            echo "❌ Traefik not responding on port 80"
             exit 1
           fi
           
-          # Then test HTTP endpoint
+          # Then check application response
           for i in {1..15}; do
-            RESPONSE=$(curl -sS -m 10 -o /dev/null -w "%{http_code}" "http://$IP")
-            if [ "$RESPONSE" = "200" ]; then
-              echo "✅ Application responded successfully with HTTP 200!"
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" -m 5 "http://$IP")
+            if [ "$STATUS" = "200" ]; then
+              echo "✅ Application responded with HTTP 200"
               curl -v "http://$IP"
               exit 0
             fi
-            echo "Attempt $i: Got HTTP $RESPONSE, waiting..."
+            echo "Attempt $i: HTTP $STATUS, waiting..."
             sleep 5
           done
           
