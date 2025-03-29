@@ -72,7 +72,15 @@ resource "aws_instance" "flask_app" {
     set -euo pipefail
     exec > >(tee /var/log/user-data.log) 2>&1
 
-
+    sudo mkdir -p /etc/rancher/k3s/
+    cat << 'EOL' | sudo tee /etc/rancher/k3s/traefik-config.yaml
+    ports:
+      web:
+        port: 80
+        expose: true
+        exposedPort: 80
+        protocol: TCP
+    EOL
 
     # Install k3s with built-in Traefik (lightweight config)
     curl -sfL https://get.k3s.io | \
@@ -81,7 +89,8 @@ resource "aws_instance" "flask_app" {
       sh -s - --write-kubeconfig-mode 644 \
               --disable servicelb \
               --disable local-storage \
-              --disable metrics-server
+              --disable metrics-server \
+              --traefik-config /etc/rancher/k3s/traefik-config.yaml
 
     # Configure GHCR authentication
     sudo mkdir -p /etc/rancher/k3s/
