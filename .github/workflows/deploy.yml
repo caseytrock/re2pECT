@@ -91,17 +91,6 @@ jobs:
             ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} \
             "until kubectl cluster-info &>/dev/null; do sleep 10; echo 'Waiting for k3s API...'; done"
 
-      - name: Wait for EC2 Initialization
-        run: |
-          IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
-          until ssh -i ~/.ssh/deploy_key ec2-user@$IP \
-            "sudo cloud-init status | grep -q 'done'"; do
-            sleep 10
-            echo "Waiting for cloud-init..."
-          done
-
-
-
       - name: Checkout code
         uses: actions/checkout@v4
 
