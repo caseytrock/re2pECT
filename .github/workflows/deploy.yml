@@ -156,19 +156,19 @@ jobs:
                     periodSeconds: 5
                     timeoutSeconds: 1
 
-                livenessProbe:
-                  httpGet:
-                    path: /health
-                    port: 5000
-                  initialDelaySeconds: 10
-                  periodSeconds: 10
-                  resources:
-                    limits:
-                      cpu: "500m"
-                      memory: "256Mi"
-                    requests:
-                      cpu: "100m"
-                      memory: "128Mi"
+                  livenessProbe:
+                    httpGet:
+                      path: /health
+                      port: 5000
+                    initialDelaySeconds: 10
+                    periodSeconds: 10
+                    resources:
+                      limits:
+                        cpu: "500m"
+                        memory: "256Mi"
+                      requests:
+                        cpu: "100m"
+                        memory: "128Mi"
           ---
           apiVersion: v1
           kind: Service
