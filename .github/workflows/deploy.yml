@@ -127,8 +127,10 @@ jobs:
 
       - name: Configure Traefik for Port 80
         run: |
-          ssh -i ~/.ssh/deploy_key ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} << 'EOF'
-          sudo cat << 'EOL' | sudo tee /var/lib/rancher/k3s/server/manifests/traefik-config.yaml
+          ssh -T -i ~/.ssh/deploy_key ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} << 'EOF'
+          # 1. Create Traefik configuration
+          sudo mkdir -p /var/lib/rancher/k3s/server/manifests/
+          sudo cat << 'EOL' > /var/lib/rancher/k3s/server/manifests/traefik-config.yaml
           apiVersion: helm.cattle.io/v1
           kind: HelmChartConfig
           metadata:
@@ -140,39 +142,24 @@ jobs:
                 web:
                   hostPort: 80
               deployment:
+                kind: DaemonSet
                 hostNetwork: true
                 dnsPolicy: ClusterFirstWithHostNet
           EOL
+      
+          # 2. Restart k3s to apply changes
           sudo systemctl restart k3s
-          sleep 60
-          EOF
-
-      - name: Verify Traefik
-        run: |
-          ssh -T -i ~/.ssh/deploy_key ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} << 'EOF'
-          # Disable motd and verify Traefik
-          export DEBIAN_FRONTEND=noninteractive
-          touch ~/.hushlogin
-          
-          # Check Traefik pod status
+          sleep 20  # Wait for restart
+      
+          # 3. Verify installation
           kubectl get pods -n kube-system -l app.kubernetes.io/name=traefik -o wide
-          
-          # Verify port 80 binding
-          if sudo netstat -tulnp | grep -q ':80\s'; then
-            echo "✅ Traefik is bound to port 80"
-          else
-            echo "❌ Traefik is NOT bound to port 80"
-            exit 1
-          fi
-          
-          # Verify Traefik config
-          sudo cat /var/lib/rancher/k3s/server/manifests/traefik-config.yaml | grep -A 5 'hostPort: 80'
+          sudo netstat -tulnp | grep -E ':80\s' || echo "Port 80 not bound"
           EOF
-
-      - name: Verify Traefik Port Binding
+        
+      - name: Verify Traefik Binding
         run: |
-          ssh -i ~/.ssh/deploy_key ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} \
-            "sudo netstat -tulnp | grep 80"
+          ssh -T -i ~/.ssh/deploy_key ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} \
+            "sudo netstat -tulnp | grep -E ':80\s' && echo '✅ Traefik bound to port 80' || (echo '❌ Traefik NOT bound to port 80'; exit 1)"
 
       - name: Deploy with Traefik Ingress
         run: |
