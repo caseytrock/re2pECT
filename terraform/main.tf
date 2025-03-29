@@ -51,7 +51,7 @@ resource "aws_security_group" "flask_app_sg" {
     from_port   = 5000
     to_port     = 5000
     protocol    = "tcp"
-    cidr_blocks = ["172.31.0.0/16"]  # Only allow within VPC
+    cidr_blocks = ["172.31.0.0/16"] # Only allow within VPC
   }
 
   egress {
@@ -72,16 +72,6 @@ resource "aws_instance" "flask_app" {
     set -euo pipefail
     exec > >(tee /var/log/user-data.log) 2>&1
 
-    sudo mkdir -p /etc/rancher/k3s/
-    cat << 'EOL' | sudo tee /etc/rancher/k3s/traefik-config.yaml
-    ports:
-      web:
-        port: 80
-        expose: true
-        exposedPort: 80
-        protocol: TCP
-    EOL
-
     curl -sfL https://get.k3s.io | \
       INSTALL_K3S_VERSION="v1.27.6+k3s1" \
       K3S_KUBECONFIG_MODE="644" \
@@ -91,64 +81,16 @@ resource "aws_instance" "flask_app" {
               --disable metrics-server \
               --disable traefik  # First disable default Traefik
 
-# Wait for k3s to stabilize
-until kubectl get nodes &>/dev/null; do sleep 5; done
+    # Wait for k3s to stabilize
+    until kubectl get nodes &>/dev/null; do sleep 5; done
 
-# Install Traefik via Helm (recommended approach)
-helm repo add traefik https://traefik.github.io/charts
-helm repo update
-helm install traefik traefik/traefik \
-  --namespace kube-system \
-  --set ports.web.exposedPort=80 \
-  --set hostNetwork=true
-EOL
-
-    # Create Traefik config
-    sudo mkdir -p /var/lib/rancher/k3s/server/manifests
-    cat << 'EOL' | sudo tee /var/lib/rancher/k3s/server/manifests/traefik-config.yaml
-    apiVersion: helm.cattle.io/v1
-    kind: HelmChartConfig
-    metadata:
-      name: traefik
-      namespace: kube-system
-    spec:
-      valuesContent: |-
-        ports:
-          web:
-            port: 80
-            hostPort: 80
-        hostNetwork: true
-        logs:
-          general:
-            level: DEBUG
-        providers:
-          kubernetesIngress:
-            publishedService:
-              enabled: true
-    EOL
-
-    # Wait for cluster
-    until kubectl cluster-info; do sleep 5; done
-
-    # Configure GHCR authentication
-    sudo mkdir -p /etc/rancher/k3s/
-    cat << 'EOL' | sudo tee /etc/rancher/k3s/registries.yaml
-    mirrors:
-      ghcr.io:
-        endpoint:
-          - "https://ghcr.io"
-    configs:
-      "ghcr.io":
-        auth:
-          username: "${var.ghcr_username}"
-          password: "${var.ghcr_token}"
-    EOL
-
-    # Restart k3s to apply registry config
-    sudo systemctl restart k3s
-
-    # Verify cluster
-    until kubectl get nodes >/dev/null 2>&1; do sleep 5; done
+    # Install Traefik via Helm (recommended approach)
+    helm repo add traefik https://traefik.github.io/charts
+    helm repo update
+    helm install traefik traefik/traefik \
+      --namespace kube-system \
+      --set ports.web.exposedPort=80 \
+      --set hostNetwork=true
   EOF
 
   vpc_security_group_ids = [aws_security_group.flask_app_sg.id]
