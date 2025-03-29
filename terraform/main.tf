@@ -89,9 +89,19 @@ resource "aws_instance" "flask_app" {
               --disable servicelb \
               --disable local-storage \
               --disable metrics-server \
-              --traefik \
-              --traefik-config-arg="ports.web.expose=true" \
-              --traefik-config-arg="ports.web.exposedPort=80"
+              --disable traefik  # First disable default Traefik
+
+# Wait for k3s to stabilize
+until kubectl get nodes &>/dev/null; do sleep 5; done
+
+# Install Traefik via Helm (recommended approach)
+helm repo add traefik https://traefik.github.io/charts
+helm repo update
+helm install traefik traefik/traefik \
+  --namespace kube-system \
+  --set ports.web.exposedPort=80 \
+  --set hostNetwork=true
+EOF
 
     # Create Traefik config
     sudo mkdir -p /var/lib/rancher/k3s/server/manifests
