@@ -72,6 +72,11 @@ resource "aws_instance" "flask_app" {
     set -euo pipefail
     exec > >(tee /var/log/user-data.log) 2>&1
 
+    # Free up port 80
+    sudo systemctl stop nginx 2>/dev/null || true
+    sudo systemctl stop apache2 2>/dev/null || true
+    sudo pkill -f ":80" || true
+
     # Install k3s WITH Traefik enabled (default)
     curl -sfL https://get.k3s.io | \
       INSTALL_K3S_VERSION="v1.27.6+k3s1" \
@@ -91,11 +96,20 @@ resource "aws_instance" "flask_app" {
       namespace: kube-system
     spec:
       valuesContent: |-
+        deployment:
+          replicas: 1
         ports:
           web:
-            port: 80
+            port: 8000
             hostPort: 80
         hostNetwork: true
+        additionalArguments:
+          - --entryPoints.web.address=:80
+          - --providers.kubernetesIngress
+        resources:
+          requests:
+            cpu: "50m"
+            memory: "50Mi"
     EOL
 
     # Wait for Traefik
