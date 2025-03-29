@@ -72,6 +72,8 @@ resource "aws_instance" "flask_app" {
     set -euo pipefail
     exec > >(tee /var/log/user-data.log) 2>&1
 
+
+
     # Install k3s with built-in Traefik (lightweight config)
     curl -sfL https://get.k3s.io | \
       INSTALL_K3S_VERSION="v1.27.6+k3s1" \

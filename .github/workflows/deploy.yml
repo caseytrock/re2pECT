@@ -7,7 +7,7 @@ on:
 env:
   AWS_REGION: 'us-west-2'
   FLASK_PORT: '5000'
-  DOCKER_IMAGE: ghcr.io/${{ github.repository_owner }}/re2ect-app:latest
+  DOCKER_IMAGE: ghcr.io/${{ github.repository_owner }}/re2pect-app:latest
 
 jobs:
   provision-infrastructure:
@@ -115,24 +115,37 @@ jobs:
 
       - name: Deploy Application
         run: |
+          # Create image pull secret
+          ssh -i ~/.ssh/deploy_key ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} << 'EOF'
+          kubectl create secret docker-registry ghcr-secret \
+            --docker-server=ghcr.io \
+            --docker-username=${{ github.repository_owner }} \
+            --docker-password=${{ secrets.GITHUB_TOKEN }} \
+            --docker-email=actions@github.com \
+            --dry-run=client -o yaml | kubectl apply -f -
+          EOF
+
           cat <<EOF > deploy.yaml
           apiVersion: apps/v1
           kind: Deployment
           metadata:
-            name: re2ect-app
+            name: re2pect-app
           spec:
             replicas: 1
             selector:
               matchLabels:
-                app: re2ect-app
+                app: re2pect-app
             template:
               metadata:
                 labels:
-                  app: re2ect-app
+                  app: re2pect-app
               spec:
+                imagePullSecrets:
+                - name: ghcr-secret
                 containers:
                 - name: app
                   image: ${{ env.DOCKER_IMAGE }}
+                  imagePullPolicy: Always
                   ports:
                   - containerPort: ${{ env.FLASK_PORT }}
                   resources:
@@ -146,19 +159,19 @@ jobs:
           apiVersion: v1
           kind: Service
           metadata:
-            name: re2ect-app-service
+            name: re2pect-app-service
           spec:
             type: ClusterIP
             ports:
             - port: 80
               targetPort: ${{ env.FLASK_PORT }}
             selector:
-              app: re2ect-app
+              app: re2pect-app
           ---
           apiVersion: networking.k8s.io/v1
           kind: Ingress
           metadata:
-            name: re2ect-app-ingress
+            name: re2pect-app-ingress
           spec:
             rules:
             - http:
@@ -167,7 +180,7 @@ jobs:
                   pathType: Prefix
                   backend:
                     service:
-                      name: re2ect-app-service
+                      name: re2pect-app-service
                       port:
                         number: 80
           EOF
@@ -180,7 +193,7 @@ jobs:
         run: |
           IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
           ssh -i ~/.ssh/deploy_key ec2-user@$IP << 'EOF'
-          kubectl rollout status deployment/re2ect-app --timeout=180s
+          kubectl rollout status deployment/re2pect-app --timeout=180s
           echo "=== Cluster Status ==="
           kubectl get pods,svc,ingress -A
           EOF
