@@ -84,7 +84,6 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Essential Docker steps (only for building/pushing)
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -104,7 +103,6 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # Configure containerd on EC2 to pull from GHCR
       - name: Configure GHCR Auth for Containerd
         run: |
           IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
@@ -124,7 +122,7 @@ jobs:
           sudo systemctl restart k3s
           EOF
 
-      - name: Configure Traefik Ingress
+      - name: Configure Traefik Properly
         run: |
           IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
           ssh -i ~/.ssh/deploy_key ec2-user@$IP << 'EOF'
@@ -141,10 +139,12 @@ jobs:
                 web:
                   port: 80
                   hostPort: 80
+                websecure:
+                  port: 443
+                  hostPort: 443
               deployment:
                 kind: DaemonSet
                 hostNetwork: true
-              # Add these additional settings:
               providers:
                 kubernetesIngress:
                   publishedService:
@@ -153,7 +153,7 @@ jobs:
                 level: DEBUG
           EOL
           sudo systemctl restart k3s
-          sleep 10  # Give Traefik time to restart
+          sleep 15
           EOF
 
       - name: Deploy Application
@@ -178,6 +178,10 @@ jobs:
                   image: ${{ env.DOCKER_IMAGE }}
                   ports:
                   - containerPort: ${{ env.FLASK_PORT }}
+                  readinessProbe:
+                    httpGet:
+                      path: /
+                      port: ${{ env.FLASK_PORT }}
           ---
           apiVersion: v1
           kind: Service
@@ -196,9 +200,6 @@ jobs:
             name: re2ect-app-ingress
             annotations:
               traefik.ingress.kubernetes.io/router.entrypoints: web
-              # Add these critical annotations:
-              traefik.ingress.kubernetes.io/rule-type: PathPrefix
-              traefik.ingress.kubernetes.io/service.serversscheme: http
           spec:
             rules:
             - http:
@@ -212,26 +213,27 @@ jobs:
                         number: 80
           EOF
 
-          scp -i ~/.ssh/deploy_key deploy.yaml ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }}:~/
+          scp -i ~/.ssh/deploy_key deploy.yaml ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }}:~/ 
           ssh -i ~/.ssh/deploy_key ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} \
-            "kubectl apply -f deploy.yaml && \
-             kubectl get pods,svc,ingress"
+            "kubectl apply -f deploy.yaml"
 
-      - name: Verify Application
+      - name: Verify Deployment
         run: |
           IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
-          # First check Traefik is working
-          ssh -i ~/.ssh/deploy_key ec2-user@$IP \
-            "kubectl get pods -n kube-system -l app.kubernetes.io/name=traefik && \
-             sudo netstat -tulnp | grep 80"
-          
-          # Then test the endpoint
-          curl -v --retry 5 --retry-delay 10 \
-            http://$IP/
+          ssh -i ~/.ssh/deploy_key ec2-user@$IP << 'EOF'
+          kubectl wait --for=condition=available deployment/re2ect-app --timeout=120s
+          kubectl get pods,svc,ingress -A
+          sudo netstat -tulnp | grep -E '80|443'
+          EOF
 
       - name: Test Application
         run: |
           IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
-          curl -v --retry 5 --retry-delay 10 \
-            -H "Host: $IP.nip.io" \
+          # Wait for everything to stabilize
+          sleep 20
+          # Test HTTP
+          curl -v --retry 5 --retry-delay 5 --connect-timeout 10 \
             http://$IP/
+          # Test HTTPS (if configured)
+          curl -vk --retry 3 --retry-delay 5 --connect-timeout 10 \
+            https://$IP/ || echo "HTTPS not configured"
