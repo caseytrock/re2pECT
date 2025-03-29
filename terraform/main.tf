@@ -77,45 +77,61 @@ resource "aws_instance" "flask_app" {
     sudo systemctl stop apache2 2>/dev/null || true
     sudo pkill -f ":80" || true
 
-    # Install k3s WITH Traefik enabled (default)
+    # Install minimal k3s
     curl -sfL https://get.k3s.io | \
       INSTALL_K3S_VERSION="v1.27.6+k3s1" \
       K3S_KUBECONFIG_MODE="644" \
       sh -s - server \
               --disable servicelb \
               --disable local-storage \
-              --disable metrics-server
+              --disable metrics-server \
+              --disable traefik \
+              --disable helm-controller \
+              --disable-network-policy \
+              --disable coredns \
+              --flannel-backend=none \
+              --kubelet-arg="serialize-image-pulls=false"
 
-    # Configure Traefik via k3s manifest
+    # Install minimal Traefik
     sudo mkdir -p /var/lib/rancher/k3s/server/manifests
-    cat << 'EOL' | sudo tee /var/lib/rancher/k3s/server/manifests/traefik-config.yaml
-    apiVersion: helm.cattle.io/v1
-    kind: HelmChartConfig
+    cat <<'EOL' | sudo tee /var/lib/rancher/k3s/server/manifests/traefik.yaml
+    apiVersion: apps/v1
+    kind: Deployment
     metadata:
       name: traefik
       namespace: kube-system
     spec:
-      valuesContent: |-
-        deployment:
-          replicas: 1
-        ports:
-          web:
-            port: 8000
-            hostPort: 80
-        hostNetwork: true
-        additionalArguments:
-          - --entryPoints.web.address=:80
-          - --providers.kubernetesIngress
-        resources:
-          requests:
-            cpu: "50m"
-            memory: "50Mi"
+      replicas: 1
+      selector:
+        matchLabels:
+          app: traefik
+      template:
+        metadata:
+          labels:
+            app: traefik
+        spec:
+          containers:
+          - name: traefik
+            image: traefik:v2.10
+            args:
+              - --entryPoints.web.address=:80
+              - --providers.kubernetesingress
+            ports:
+              - containerPort: 80
+                hostPort: 80
+                name: web
+            resources:
+              requests:
+                cpu: "20m"
+                memory: "30Mi"
+          hostNetwork: true
     EOL
 
     # Wait for Traefik
-    until kubectl get pods -n kube-system -l app.kubernetes.io/name=traefik 2>/dev/null | grep -q Running; do
+    until kubectl get pods -n kube-system -l app=traefik 2>/dev/null | grep -q Running; do
       echo "Waiting for Traefik..."
-      sleep 5
+      kubectl get pods -n kube-system -l app=traefik || true
+      sleep 10
     done
   EOF
 
