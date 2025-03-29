@@ -229,15 +229,19 @@ jobs:
       - name: Test Application
         run: |
           IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
+          # Properly format the URL with http:// prefix
+          URL="http://$IP"
+          
           # Wait until we get a successful response or timeout
           timeout 120 bash -c '
-          while ! curl -sSf http://$IP/ >/dev/null; do
+          while ! curl -sSf "$URL" >/dev/null; do
             echo "Waiting for application to respond..."
             sleep 5
           done'
           
-          # Final verification
-          curl -v http://$IP/
+          # Final verification with full output
+          echo "Testing application at $URL"
+          curl -v "$URL"
 
       - name: Verify Network
         run: |
@@ -250,3 +254,11 @@ jobs:
           echo "=== Application Logs ==="
           kubectl logs deployment/re2ect-app --tail=20
           EOF
+
+      - name: Debug Network
+        run: |
+          IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
+          echo "Testing connection to port 80..."
+          nc -zv $IP 80
+          echo "Curl test with full URL..."
+          curl -v "http://$IP"
