@@ -35,14 +35,12 @@ jobs:
       - name: Terraform Apply (Smart Update)
         id: tf-apply
         run: |
-          # First try refresh-only to preserve existing infrastructure
           if terraform apply -refresh-only -auto-approve \
               -var="ghcr_username=${{ github.repository_owner }}" \
               -var="ghcr_token=${{ secrets.GITHUB_TOKEN }}" \
               -input=false; then
             echo "Existing infrastructure refreshed"
           else
-            # If refresh fails, do a normal apply (for first-time setup)
             echo "Performing full apply..."
             terraform apply -auto-approve \
               -var="ghcr_username=${{ github.repository_owner }}" \
@@ -144,6 +142,64 @@ jobs:
           sudo systemctl restart k3s
           EOF
 
+      - name: Install and Configure Traefik
+        run: |
+          IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
+          ssh -i ~/.ssh/deploy_key ec2-user@$IP << 'EOF'
+          # Ensure Traefik is properly installed
+          sudo kubectl apply -f - <<EOL
+          apiVersion: helm.cattle.io/v1
+          kind: HelmChart
+          metadata:
+            name: traefik
+            namespace: kube-system
+          spec:
+            chart: traefik
+            repo: https://helm.traefik.io/traefik
+            targetNamespace: kube-system
+            valuesContent: |-
+              deployment:
+                kind: DaemonSet
+                hostNetwork: true
+              ports:
+                web:
+                  port: 80
+                  hostPort: 80
+                  expose: true
+                  protocol: TCP
+              service:
+                type: ClusterIP
+              providers:
+                kubernetesIngress:
+                  publishedService:
+                    enabled: true
+          EOL
+          
+          # Wait for Traefik to be ready
+          until kubectl get pods -n kube-system -l app.kubernetes.io/name=traefik | grep Running; do
+            sleep 5
+            echo "Waiting for Traefik..."
+          done
+          
+          # Verify port binding
+          until sudo netstat -tulnp | grep -E ':80\s.*traefik'; do
+            sleep 3
+            echo "Waiting for Traefik to bind to port 80..."
+          done
+          EOF
+
+      - name: Verify Network Configuration
+        run: |
+          IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
+          ssh -i ~/.ssh/deploy_key ec2-user@$IP << 'EOF'
+          echo "=== Network Status ==="
+          sudo netstat -tulnp | grep -E '80|443'
+          echo "=== Traefik Pod ==="
+          kubectl get pods -n kube-system -l app.kubernetes.io/name=traefik -o wide
+          echo "=== Traefik Logs ==="
+          kubectl logs -n kube-system -l app.kubernetes.io/name=traefik --tail=50
+          EOF
+
       - name: Deploy Application
         run: |
           cat <<EOF > deploy.yaml
@@ -209,22 +265,52 @@ jobs:
         run: |
           IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
           ssh -i ~/.ssh/deploy_key ec2-user@$IP << 'EOF'
-          kubectl rollout status deployment/re2ect-app --timeout=120s
-          kubectl get pods,svc,ingress
+          kubectl rollout status deployment/re2ect-app --timeout=180s
+          echo "=== Cluster Status ==="
+          kubectl get pods,svc,ingress -A
           EOF
 
       - name: Test Application
         run: |
           IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
           echo "Testing application at http://$IP"
-          for i in {1..10}; do
-            if curl -fsS -m 5 "http://$IP" >/dev/null; then
-              echo "✅ Application is responding!"
+          
+          # First verify basic port connectivity
+          if ! nc -zv -w 5 $IP 80; then
+            echo "❌ Port 80 not accessible"
+            exit 1
+          fi
+          
+          # Then test HTTP endpoint
+          for i in {1..15}; do
+            RESPONSE=$(curl -sS -m 10 -o /dev/null -w "%{http_code}" "http://$IP")
+            if [ "$RESPONSE" = "200" ]; then
+              echo "✅ Application responded successfully with HTTP 200!"
               curl -v "http://$IP"
               exit 0
             fi
-            echo "Attempt $i: Application not yet ready..."
+            echo "Attempt $i: Got HTTP $RESPONSE, waiting..."
             sleep 5
           done
-          echo "❌ Application did not respond after 10 attempts"
+          
+          echo "❌ Application did not return 200 OK after 15 attempts"
           exit 1
+
+      - name: Debug on Failure
+        if: ${{ failure() }}
+        run: |
+          IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
+          echo "=== Debug Information ==="
+          echo "Port check:"
+          nc -zv $IP 80 || echo "Port 80 not accessible"
+          echo "Curl verbose output:"
+          curl -v "http://$IP" || true
+          echo "Traefik logs:"
+          ssh -i ~/.ssh/deploy_key ec2-user@$IP \
+            "kubectl logs -n kube-system -l app.kubernetes.io/name=traefik --tail=50"
+          echo "Application logs:"
+          ssh -i ~/.ssh/deploy_key ec2-user@$IP \
+            "kubectl logs deployment/re2ect-app --tail=20"
+          echo "Cluster events:"
+          ssh -i ~/.ssh/deploy_key ec2-user@$IP \
+            "kubectl get events -A --sort-by=.metadata.creationTimestamp"
