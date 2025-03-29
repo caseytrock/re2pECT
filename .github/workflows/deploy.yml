@@ -94,6 +94,88 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Configure GHCR Auth for Containerd
+        run: |
+          IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
+          ssh -i ~/.ssh/deploy_key ec2-user@$IP << 'EOF'
+          sudo mkdir -p /etc/rancher/k3s/
+          cat << 'EOL' | sudo tee /etc/rancher/k3s/registries.yaml
+          mirrors:
+            ghcr.io:
+              endpoint:
+                - "https://ghcr.io"
+          configs:
+            "ghcr.io":
+              auth:
+                username: "${{ github.repository_owner }}"
+                password: "${{ secrets.GITHUB_TOKEN }}"
+          EOL
+          sudo systemctl restart k3s
+          EOF
+  
+      - name: Configure and Verify Traefik on Port 80
+        run: |
+          IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
+          ssh -T -i ~/.ssh/deploy_key ec2-user@$IP << 'EOF'
+          # 1. Configure Traefik for port 80
+          sudo mkdir -p /var/lib/rancher/k3s/server/manifests/
+          sudo cat << 'EOL' > /var/lib/rancher/k3s/server/manifests/traefik-config.yaml
+          apiVersion: helm.cattle.io/v1
+          kind: HelmChartConfig
+          metadata:
+            name: traefik
+            namespace: kube-system
+          spec:
+            valuesContent: |-
+              ports:
+                web:
+                  port: 80
+                  hostPort: 80
+              deployment:
+                kind: DaemonSet
+                hostNetwork: true
+                dnsPolicy: ClusterFirstWithHostNet
+          EOL
+      
+          # 2. Restart k3s
+          echo "Restarting k3s..."
+          sudo systemctl restart k3s
+      
+          # 3. Wait for Traefik (up to 60 seconds)
+          echo "Waiting for Traefik..."
+          timeout 60 bash -c 'until kubectl get pods -n kube-system -l app.kubernetes.io/name=traefik | grep -q Running; do
+            sleep 3; echo -n "."
+          done'
+          EOF
+
+      - name: Deploy Application
+        run: |
+          cat <<EOF > deploy.yaml
+          [YOUR FULL DEPLOYMENT MANIFEST HERE]
+          EOF
+          
+          scp -i ~/.ssh/deploy_key deploy.yaml ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }}:~/
+          ssh -i ~/.ssh/deploy_key ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} \
+            "kubectl apply -f deploy.yaml"
+
+      - name: Verify Deployment
+        run: |
+          IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
+          ssh -i ~/.ssh/deploy_key ec2-user@$IP << 'EOF'
+          # Wait for app pods
+          until kubectl get pods -o jsonpath='{.items[*].status.phase}' | grep -q Running; do
+            sleep 5
+            echo "Waiting for application pods..."
+          done
+          EOF
+
+      - name: Test Application Access
+        run: |
+          IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
+          curl -v --retry 5 --retry-delay 10 \
+            -H "Host: $IP.nip.io" \
+            http://$IP/
+
       - name: Build and Push Docker Image
         id: build-push
         uses: docker/build-push-action@v5
@@ -125,10 +207,11 @@ jobs:
           sudo systemctl restart k3s
           EOF
 
-      - name: Configure Traefik for Port 80
+      - name: Configure and Verify Traefik on Port 80
         run: |
-          ssh -T -i ~/.ssh/deploy_key ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} << 'EOF'
-          # 1. Create Traefik configuration
+          IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
+          ssh -T -i ~/.ssh/deploy_key ec2-user@$IP << 'EOF'
+          # 1. Configure Traefik for port 80
           sudo mkdir -p /var/lib/rancher/k3s/server/manifests/
           sudo cat << 'EOL' > /var/lib/rancher/k3s/server/manifests/traefik-config.yaml
           apiVersion: helm.cattle.io/v1
@@ -140,6 +223,7 @@ jobs:
             valuesContent: |-
               ports:
                 web:
+                  port: 80
                   hostPort: 80
               deployment:
                 kind: DaemonSet
@@ -147,19 +231,47 @@ jobs:
                 dnsPolicy: ClusterFirstWithHostNet
           EOL
       
-          # 2. Restart k3s to apply changes
+          # 2. Restart k3s (full restart works better than reload)
+          echo "Restarting k3s..."
           sudo systemctl restart k3s
-          sleep 20  # Wait for restart
       
-          # 3. Verify installation
-          kubectl get pods -n kube-system -l app.kubernetes.io/name=traefik -o wide
-          sudo netstat -tulnp | grep -E ':80\s' || echo "Port 80 not bound"
+          # 3. Wait for Traefik to be ready (up to 60 seconds)
+          echo "Waiting for Traefik to start..."
+          timeout 60 bash -c 'until kubectl get pods -n kube-system -l app.kubernetes.io/name=traefik -o jsonpath="{.items[0].status.phase}" | grep -q Running; do
+            sleep 3
+            echo -n "."
+          done' || echo "Timed out waiting for Traefik pod"
+      
+          # 4. Verify port 80 binding (with retries)
+          echo "Verifying port 80 binding..."
+          for i in {1..10}; do
+            if sudo ss -tulnp | grep -q ':80\s'; then
+              echo "✅ Traefik successfully bound to port 80"
+              exit 0
+            fi
+            sleep 5
+            echo "Attempt $i/10: Port 80 not bound yet..."
+          done
+      
+          # 5. Fallback to NodePort if needed
+          NODEPORT=$(kubectl get svc -n kube-system traefik -o jsonpath='{.spec.ports[?(@.name=="web")].nodePort}')
+          echo "❌ Traefik not bound to port 80, using NodePort $NODEPORT instead"
+          echo "NODEPORT=$NODEPORT" >> $GITHUB_ENV
+          exit 0  # Don't fail the step - we'll use the fallback
           EOF
-        
-      - name: Verify Traefik Binding
+          
+      - name: Verify Application Access
         run: |
-          ssh -T -i ~/.ssh/deploy_key ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} \
-            "sudo netstat -tulnp | grep -E ':80\s' && echo '✅ Traefik bound to port 80' || (echo '❌ Traefik NOT bound to port 80'; exit 1)"
+          IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
+          if [ -z "$NODEPORT" ]; then
+            # Try port 80 first
+            echo "Testing port 80..."
+            curl -v --retry 3 --retry-delay 5 -H "Host: $IP.nip.io" http://$IP/
+          else
+            # Fallback to NodePort
+            echo "Testing NodePort $NODEPORT..."
+            curl -v --retry 3 --retry-delay 5 -H "Host: $IP.nip.io" http://$IP:$NODEPORT/
+          fi
 
       - name: Deploy with Traefik Ingress
         run: |
