@@ -229,11 +229,24 @@ jobs:
       - name: Test Application
         run: |
           IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
-          # Wait for everything to stabilize
-          sleep 20
-          # Test HTTP
-          curl -v --retry 5 --retry-delay 5 --connect-timeout 10 \
-            http://$IP/
-          # Test HTTPS (if configured)
-          curl -vk --retry 3 --retry-delay 5 --connect-timeout 10 \
-            https://$IP/ || echo "HTTPS not configured"
+          # Wait until we get a successful response or timeout
+          timeout 120 bash -c '
+          while ! curl -sSf http://$IP/ >/dev/null; do
+            echo "Waiting for application to respond..."
+            sleep 5
+          done'
+          
+          # Final verification
+          curl -v http://$IP/
+
+      - name: Verify Network
+        run: |
+          IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
+          ssh -i ~/.ssh/deploy_key ec2-user@$IP << 'EOF'
+          echo "=== Active Ports ==="
+          sudo ss -tulnp | grep -E '80|443'
+          echo "=== Traefik Status ==="
+          kubectl get pods -n kube-system -l app.kubernetes.io/name=traefik
+          echo "=== Application Logs ==="
+          kubectl logs deployment/re2ect-app --tail=20
+          EOF
