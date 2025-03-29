@@ -67,29 +67,21 @@ resource "aws_instance" "flask_app" {
   instance_type = var.instance_type
   key_name      = aws_key_pair.flask_app_key_pair.key_name
 
-  lifecycle {
-    prevent_destroy = true
-    ignore_changes = [
-      ami,
-      user_data,
-      tags
-    ]
-  }
-
   user_data = <<-EOF
     #!/bin/bash
     set -euo pipefail
     exec > >(tee /var/log/user-data.log) 2>&1
 
-    # Install k3s with containerd (no Docker)
-    echo "=== Installing k3s with containerd ==="
+    # Install k3s with built-in Traefik (lightweight config)
     curl -sfL https://get.k3s.io | \
       INSTALL_K3S_VERSION="v1.27.6+k3s1" \
       K3S_KUBECONFIG_MODE="644" \
-      sh -s - --write-kubeconfig-mode 644
+      sh -s - --write-kubeconfig-mode 644 \
+              --disable servicelb \
+              --disable local-storage \
+              --disable metrics-server
 
-    # Configure GHCR authentication for containerd
-    echo "=== Configuring containerd for GHCR ==="
+    # Configure GHCR authentication
     sudo mkdir -p /etc/rancher/k3s/
     cat << 'EOL' | sudo tee /etc/rancher/k3s/registries.yaml
     mirrors:
@@ -106,21 +98,7 @@ resource "aws_instance" "flask_app" {
     # Restart k3s to apply registry config
     sudo systemctl restart k3s
 
-    # Install kubectl
-    echo "=== Installing kubectl ==="
-    curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-    chmod +x kubectl
-    sudo mv kubectl /usr/local/bin/
-
-    # Configure kubeconfig for remote access
-    echo "=== Configuring kubeconfig ==="
-    mkdir -p /home/ec2-user/.kube
-    sudo cp /etc/rancher/k3s/k3s.yaml /home/ec2-user/.kube/config
-    sudo chown ec2-user:ec2-user /home/ec2-user/.kube/config
-    sed -i "s/127.0.0.1/$(curl -s http://169.254.169.254/latest/meta-data/local-ipv4)/g" /home/ec2-user/.kube/config
-
     # Verify cluster
-    echo "=== Waiting for cluster ==="
     until kubectl get nodes >/dev/null 2>&1; do sleep 5; done
   EOF
 
