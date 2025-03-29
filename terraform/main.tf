@@ -129,12 +129,3 @@ resource "aws_instance" "flask_app" {
     Name = "flask-app-instance"
   }
 }
-
-output "public_ip" {
-  value = aws_instance.flask_app.public_ip
-}
-
-output "ssh_private_key" {
-  value     = tls_private_key.flask_app_key.private_key_pem
-  sensitive = true
-}
