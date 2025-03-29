@@ -251,6 +251,22 @@ jobs:
           echo "Application did not become responsive after 20 attempts"
           exit 1
 
+      - name: Debug on Failure
+        if: ${{ failure() }}
+        run: |
+          IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
+          echo "=== Debug Information ==="
+          echo "Port check:"
+          nc -zv $IP 80 || echo "Port 80 not accessible"
+          echo "Curl verbose output:"
+          curl -v "http://$IP" || true
+          echo "Traefik logs:"
+          ssh -i ~/.ssh/deploy_key ec2-user@$IP \
+            "kubectl logs -n kube-system -l app.kubernetes.io/name=traefik --tail=50"
+          echo "Application logs:"
+          ssh -i ~/.ssh/deploy_key ec2-user@$IP \
+            "kubectl logs deployment/re2ect-app --tail=20"
+
       - name: Debug Network
         run: |
           IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
