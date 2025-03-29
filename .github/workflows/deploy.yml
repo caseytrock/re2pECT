@@ -7,7 +7,7 @@ on:
 env:
   AWS_REGION: 'us-west-2'
   FLASK_PORT: '5000'
-  DOCKER_IMAGE: ghcr.io/${{ github.repository_owner }}/re2pect-app:latest
+  DOCKER_IMAGE: ghcr.io/${{ github.repository_owner }}/re2ect-app:latest
 
 jobs:
   provision-infrastructure:
@@ -75,15 +75,16 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           echo "StrictHostKeyChecking no" >> ~/.ssh/config
 
-      - name: Verify k3s Readiness (Containerd)
+      - name: Verify k3s Readiness
         run: |
           ssh -i ~/.ssh/deploy_key \
               ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} \
-              "until sudo crictl ps &>/dev/null && kubectl get nodes &>/dev/null; do sleep 5; echo 'Waiting for containerd/k3s...'; done"
+              "until kubectl get nodes &>/dev/null; do sleep 5; echo 'Waiting for k3s...'; done"
 
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # Essential Docker steps (only for building/pushing)
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -94,6 +95,16 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Build and Push Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./app
+          push: true
+          tags: ${{ env.DOCKER_IMAGE }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Configure containerd on EC2 to pull from GHCR
       - name: Configure GHCR Auth for Containerd
         run: |
           IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
@@ -112,12 +123,11 @@ jobs:
           EOL
           sudo systemctl restart k3s
           EOF
-  
-      - name: Configure and Verify Traefik on Port 80
+
+      - name: Configure Traefik Ingress
         run: |
           IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
-          ssh -T -i ~/.ssh/deploy_key ec2-user@$IP << 'EOF'
-          # 1. Configure Traefik for port 80
+          ssh -i ~/.ssh/deploy_key ec2-user@$IP << 'EOF'
           sudo mkdir -p /var/lib/rancher/k3s/server/manifests/
           sudo cat << 'EOL' > /var/lib/rancher/k3s/server/manifests/traefik-config.yaml
           apiVersion: helm.cattle.io/v1
@@ -134,203 +144,54 @@ jobs:
               deployment:
                 kind: DaemonSet
                 hostNetwork: true
-                dnsPolicy: ClusterFirstWithHostNet
           EOL
-      
-          # 2. Restart k3s
-          echo "Restarting k3s..."
           sudo systemctl restart k3s
-      
-          # 3. Wait for Traefik (up to 60 seconds)
-          echo "Waiting for Traefik..."
-          timeout 60 bash -c 'until kubectl get pods -n kube-system -l app.kubernetes.io/name=traefik | grep -q Running; do
-            sleep 3; echo -n "."
-          done'
           EOF
 
       - name: Deploy Application
         run: |
           cat <<EOF > deploy.yaml
-          [YOUR FULL DEPLOYMENT MANIFEST HERE]
-          EOF
-          
-          scp -i ~/.ssh/deploy_key deploy.yaml ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }}:~/
-          ssh -i ~/.ssh/deploy_key ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} \
-            "kubectl apply -f deploy.yaml"
-
-      - name: Verify Deployment
-        run: |
-          IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
-          ssh -i ~/.ssh/deploy_key ec2-user@$IP << 'EOF'
-          # Wait for app pods
-          until kubectl get pods -o jsonpath='{.items[*].status.phase}' | grep -q Running; do
-            sleep 5
-            echo "Waiting for application pods..."
-          done
-          EOF
-
-      - name: Test Application Access
-        run: |
-          IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
-          curl -v --retry 5 --retry-delay 10 \
-            -H "Host: $IP.nip.io" \
-            http://$IP/
-
-      - name: Build and Push Docker Image
-        id: build-push
-        uses: docker/build-push-action@v5
-        with:
-          context: ./app
-          push: true
-          tags: |
-            ${{ env.DOCKER_IMAGE }}
-            ghcr.io/${{ github.repository_owner }}/re2pect-app:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Configure GHCR Auth for Containerd
-        run: |
-          IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
-          ssh -i ~/.ssh/deploy_key ec2-user@$IP << 'EOF'
-          sudo mkdir -p /etc/rancher/k3s/
-          cat << 'EOL' | sudo tee /etc/rancher/k3s/registries.yaml
-          mirrors:
-            ghcr.io:
-              endpoint:
-                - "https://ghcr.io"
-          configs:
-            "ghcr.io":
-              auth:
-                username: "${{ github.repository_owner }}"
-                password: "${{ secrets.GITHUB_TOKEN }}"
-          EOL
-          sudo systemctl restart k3s
-          EOF
-
-      - name: Configure and Verify Traefik on Port 80
-        run: |
-          IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
-          ssh -T -i ~/.ssh/deploy_key ec2-user@$IP << 'EOF'
-          # 1. Configure Traefik for port 80
-          sudo mkdir -p /var/lib/rancher/k3s/server/manifests/
-          sudo cat << 'EOL' > /var/lib/rancher/k3s/server/manifests/traefik-config.yaml
-          apiVersion: helm.cattle.io/v1
-          kind: HelmChartConfig
-          metadata:
-            name: traefik
-            namespace: kube-system
-          spec:
-            valuesContent: |-
-              ports:
-                web:
-                  port: 80
-                  hostPort: 80
-              deployment:
-                kind: DaemonSet
-                hostNetwork: true
-                dnsPolicy: ClusterFirstWithHostNet
-          EOL
-      
-          # 2. Restart k3s (full restart works better than reload)
-          echo "Restarting k3s..."
-          sudo systemctl restart k3s
-      
-          # 3. Wait for Traefik to be ready (up to 60 seconds)
-          echo "Waiting for Traefik to start..."
-          timeout 60 bash -c 'until kubectl get pods -n kube-system -l app.kubernetes.io/name=traefik -o jsonpath="{.items[0].status.phase}" | grep -q Running; do
-            sleep 3
-            echo -n "."
-          done' || echo "Timed out waiting for Traefik pod"
-      
-          # 4. Verify port 80 binding (with retries)
-          echo "Verifying port 80 binding..."
-          for i in {1..10}; do
-            if sudo ss -tulnp | grep -q ':80\s'; then
-              echo "✅ Traefik successfully bound to port 80"
-              exit 0
-            fi
-            sleep 5
-            echo "Attempt $i/10: Port 80 not bound yet..."
-          done
-      
-          # 5. Fallback to NodePort if needed
-          NODEPORT=$(kubectl get svc -n kube-system traefik -o jsonpath='{.spec.ports[?(@.name=="web")].nodePort}')
-          echo "❌ Traefik not bound to port 80, using NodePort $NODEPORT instead"
-          echo "NODEPORT=$NODEPORT" >> $GITHUB_ENV
-          exit 0  # Don't fail the step - we'll use the fallback
-          EOF
-          
-      - name: Verify Application Access
-        run: |
-          IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
-          if [ -z "$NODEPORT" ]; then
-            # Try port 80 first
-            echo "Testing port 80..."
-            curl -v --retry 3 --retry-delay 5 -H "Host: $IP.nip.io" http://$IP/
-          else
-            # Fallback to NodePort
-            echo "Testing NodePort $NODEPORT..."
-            curl -v --retry 3 --retry-delay 5 -H "Host: $IP.nip.io" http://$IP:$NODEPORT/
-          fi
-
-      - name: Deploy with Traefik Ingress
-        run: |
-          cat <<EOF > deploy.yaml
           apiVersion: apps/v1
           kind: Deployment
           metadata:
-            name: re2pect-app
+            name: re2ect-app
           spec:
             replicas: 2
             selector:
               matchLabels:
-                app: re2pect-app
+                app: re2ect-app
             template:
               metadata:
                 labels:
-                  app: re2pect-app
+                  app: re2ect-app
               spec:
                 containers:
                 - name: app
                   image: ${{ env.DOCKER_IMAGE }}
-                  imagePullPolicy: Always
                   ports:
                   - containerPort: ${{ env.FLASK_PORT }}
-                  resources:
-                    requests:
-                      cpu: "100m"
-                      memory: "128Mi"
                   readinessProbe:
                     httpGet:
                       path: /
                       port: ${{ env.FLASK_PORT }}
-                    initialDelaySeconds: 10
-                    periodSeconds: 5
-                  livenessProbe:
-                    httpGet:
-                      path: /
-                      port: ${{ env.FLASK_PORT }}
-                    initialDelaySeconds: 30
-                    periodSeconds: 10
           ---
           apiVersion: v1
           kind: Service
           metadata:
-            name: re2pect-app-service
+            name: re2ect-app-service
           spec:
             ports:
             - port: ${{ env.FLASK_PORT }}
               targetPort: ${{ env.FLASK_PORT }}
             selector:
-              app: re2pect-app
+              app: re2ect-app
           ---
           apiVersion: networking.k8s.io/v1
           kind: Ingress
           metadata:
-            name: re2pect-app-ingress
+            name: re2ect-app-ingress
             annotations:
               traefik.ingress.kubernetes.io/router.entrypoints: web
-              traefik.ingress.kubernetes.io/router.rule: Host(\`${{ needs.provision-infrastructure.outputs.ec2_ip }}.nip.io\`) && PathPrefix(\`/\`)
           spec:
             rules:
             - host: "${{ needs.provision-infrastructure.outputs.ec2_ip }}.nip.io"
@@ -340,39 +201,23 @@ jobs:
                   pathType: Prefix
                   backend:
                     service:
-                      name: re2pect-app-service
+                      name: re2ect-app-service
                       port:
                         number: ${{ env.FLASK_PORT }}
           EOF
 
-          scp -i ~/.ssh/deploy_key deploy.yaml ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }}:~/deploy.yaml
-          ssh -i ~/.ssh/deploy_key \
-              ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} \
-              "kubectl apply -f deploy.yaml && kubectl get pods,svc,ingress"
-
-      - name: Restart Traefik
-        run: |
+          scp -i ~/.ssh/deploy_key deploy.yaml ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }}:~/ 
           ssh -i ~/.ssh/deploy_key ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} \
-            "kubectl rollout restart deployment -n kube-system traefik"
+            "kubectl apply -f deploy.yaml"
 
-      - name: Wait for Application Readiness
-        timeout-minutes: 10
+      - name: Verify Deployment
         run: |
           IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
           ssh -i ~/.ssh/deploy_key ec2-user@$IP << 'EOF'
-          # Wait for Traefik
-          until kubectl get pods -n kube-system | grep traefik | grep -q Running; do
-            sleep 5
-            echo "Waiting for Traefik..."
-          done
-          # Wait for app pods
-          until kubectl get pods -o jsonpath='{.items[*].status.phase}' | grep -q Running; do
-            sleep 5
-            echo "Waiting for application pods..."
-          done
+          kubectl wait --for=condition=available deployment/re2ect-app --timeout=90s
           EOF
 
-      - name: Verify Application
+      - name: Test Application
         run: |
           IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
           curl -v --retry 5 --retry-delay 10 \
