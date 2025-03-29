@@ -229,31 +229,27 @@ jobs:
       - name: Test Application
         run: |
           IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
-          # Properly format the URL with http:// prefix
-          URL="http://$IP"
+          echo "Testing application at http://$IP"
           
-          # Wait until we get a successful response or timeout
-          timeout 120 bash -c '
-          while ! curl -sSf "$URL" >/dev/null; do
-            echo "Waiting for application to respond..."
+          # First verify basic connectivity
+          if ! nc -z -w5 $IP 80; then
+            echo "Port 80 not accessible"
+            exit 1
+          fi
+          
+          # Then test with curl using proper URL formatting
+          for i in {1..20}; do
+            if curl -sSf -m 10 "http://$IP" >/dev/null; then
+              echo "Application responded successfully"
+              curl -v "http://$IP"
+              exit 0
+            fi
+            echo "Attempt $i: Waiting for application to respond..."
             sleep 5
-          done'
+          done
           
-          # Final verification with full output
-          echo "Testing application at $URL"
-          curl -v "$URL"
-
-      - name: Verify Network
-        run: |
-          IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
-          ssh -i ~/.ssh/deploy_key ec2-user@$IP << 'EOF'
-          echo "=== Active Ports ==="
-          sudo ss -tulnp | grep -E '80|443'
-          echo "=== Traefik Status ==="
-          kubectl get pods -n kube-system -l app.kubernetes.io/name=traefik
-          echo "=== Application Logs ==="
-          kubectl logs deployment/re2ect-app --tail=20
-          EOF
+          echo "Application did not become responsive after 20 attempts"
+          exit 1
 
       - name: Debug Network
         run: |
