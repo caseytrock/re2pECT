@@ -7,13 +7,13 @@ variable "aws_region" {
 variable "ami_id" {
   description = "AMI ID for EC2"
   type        = string
-  default     = "ami-0f9d441b5d66d5f31"  # Amazon Linux 2023
+  default     = "ami-0f9d441b5d66d5f31" # Amazon Linux 2023
 }
 
 variable "instance_type" {
   description = "EC2 instance type"
   type        = string
-  default     = "t2.micro"  # Minimum recommended for k3s
+  default     = "t2.micro" # Minimum recommended for k3s
 }
 
 variable "ghcr_username" {

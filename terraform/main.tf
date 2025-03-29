@@ -72,25 +72,37 @@ resource "aws_instance" "flask_app" {
     set -euo pipefail
     exec > >(tee /var/log/user-data.log) 2>&1
 
+    # Install k3s WITH Traefik enabled (default)
     curl -sfL https://get.k3s.io | \
       INSTALL_K3S_VERSION="v1.27.6+k3s1" \
       K3S_KUBECONFIG_MODE="644" \
-      sh -s - --write-kubeconfig-mode 644 \
+      sh -s - server \
               --disable servicelb \
               --disable local-storage \
-              --disable metrics-server \
-              --disable traefik  # First disable default Traefik
+              --disable metrics-server
 
-    # Wait for k3s to stabilize
-    until kubectl get nodes &>/dev/null; do sleep 5; done
+    # Configure Traefik via k3s manifest
+    sudo mkdir -p /var/lib/rancher/k3s/server/manifests
+    cat << 'EOL' | sudo tee /var/lib/rancher/k3s/server/manifests/traefik-config.yaml
+    apiVersion: helm.cattle.io/v1
+    kind: HelmChartConfig
+    metadata:
+      name: traefik
+      namespace: kube-system
+    spec:
+      valuesContent: |-
+        ports:
+          web:
+            port: 80
+            hostPort: 80
+        hostNetwork: true
+    EOL
 
-    # Install Traefik via Helm (recommended approach)
-    helm repo add traefik https://traefik.github.io/charts
-    helm repo update
-    helm install traefik traefik/traefik \
-      --namespace kube-system \
-      --set ports.web.exposedPort=80 \
-      --set hostNetwork=true
+    # Wait for Traefik
+    until kubectl get pods -n kube-system -l app.kubernetes.io/name=traefik 2>/dev/null | grep -q Running; do
+      echo "Waiting for Traefik..."
+      sleep 5
+    done
   EOF
 
   vpc_security_group_ids = [aws_security_group.flask_app_sg.id]
