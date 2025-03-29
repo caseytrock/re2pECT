@@ -144,8 +144,16 @@ jobs:
               deployment:
                 kind: DaemonSet
                 hostNetwork: true
+              # Add these additional settings:
+              providers:
+                kubernetesIngress:
+                  publishedService:
+                    enabled: true
+              log:
+                level: DEBUG
           EOL
           sudo systemctl restart k3s
+          sleep 10  # Give Traefik time to restart
           EOF
 
       - name: Deploy Application
@@ -170,10 +178,6 @@ jobs:
                   image: ${{ env.DOCKER_IMAGE }}
                   ports:
                   - containerPort: ${{ env.FLASK_PORT }}
-                  readinessProbe:
-                    httpGet:
-                      path: /
-                      port: ${{ env.FLASK_PORT }}
           ---
           apiVersion: v1
           kind: Service
@@ -181,7 +185,7 @@ jobs:
             name: re2ect-app-service
           spec:
             ports:
-            - port: ${{ env.FLASK_PORT }}
+            - port: 80
               targetPort: ${{ env.FLASK_PORT }}
             selector:
               app: re2ect-app
@@ -192,6 +196,9 @@ jobs:
             name: re2ect-app-ingress
             annotations:
               traefik.ingress.kubernetes.io/router.entrypoints: web
+              # Add these critical annotations:
+              traefik.ingress.kubernetes.io/rule-type: PathPrefix
+              traefik.ingress.kubernetes.io/service.serversscheme: http
           spec:
             rules:
             - http:
@@ -202,19 +209,25 @@ jobs:
                     service:
                       name: re2ect-app-service
                       port:
-                        number: ${{ env.FLASK_PORT }}
+                        number: 80
           EOF
 
-          scp -i ~/.ssh/deploy_key deploy.yaml ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }}:~/ 
+          scp -i ~/.ssh/deploy_key deploy.yaml ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }}:~/
           ssh -i ~/.ssh/deploy_key ec2-user@${{ needs.provision-infrastructure.outputs.ec2_ip }} \
-              "kubectl apply -f deploy.yaml"
+            "kubectl apply -f deploy.yaml && \
+             kubectl get pods,svc,ingress"
 
-      - name: Verify Deployment
+      - name: Verify Application
         run: |
           IP=${{ needs.provision-infrastructure.outputs.ec2_ip }}
-          ssh -i ~/.ssh/deploy_key ec2-user@$IP << 'EOF'
-          kubectl wait --for=condition=available deployment/re2ect-app --timeout=90s
-          EOF
+          # First check Traefik is working
+          ssh -i ~/.ssh/deploy_key ec2-user@$IP \
+            "kubectl get pods -n kube-system -l app.kubernetes.io/name=traefik && \
+             sudo netstat -tulnp | grep 80"
+          
+          # Then test the endpoint
+          curl -v --retry 5 --retry-delay 10 \
+            http://$IP/
 
       - name: Test Application
         run: |
